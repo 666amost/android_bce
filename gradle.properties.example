@@ -1,0 +1,21 @@
+# Copy this file to gradle.properties and fill in local values.
+# gradle.properties is intentionally excluded from Git.
+
+android.useAndroidX=true
+android.enableJetifier=true
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+kotlin.code.style=official
+android.nonTransitiveRClass=true
+org.gradle.parallel=true
+org.gradle.caching=true
+
+SUPPORT_WA_NUMBER=
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+BRANCH_SYNC_URL=
+BRANCH_API_KEY=
+MQTT_HOST=
+MQTT_PORT=8883
+MQTT_USERNAME=
+MQTT_PASSWORD=
+MQTT_ENABLED=false

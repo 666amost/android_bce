@@ -1,0 +1,38 @@
+package com.bce.courier.data.local
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.Query
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface PendingUpdateDao {
+    @Insert
+    suspend fun insert(update: PendingUpdateEntity): Long
+
+    @Update
+    suspend fun update(update: PendingUpdateEntity)
+
+    @Query("SELECT * FROM pending_updates WHERE isSyncing = 0 ORDER BY priority ASC, timestamp ASC LIMIT 1")
+    suspend fun getNextPending(): PendingUpdateEntity?
+
+    @Query("SELECT * FROM pending_updates WHERE isSyncing = 0 ORDER BY priority ASC, timestamp ASC")
+    fun observePendingUpdates(): Flow<List<PendingUpdateEntity>>
+
+    @Query("SELECT COUNT(*) FROM pending_updates WHERE isSyncing = 0")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("DELETE FROM pending_updates WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("UPDATE pending_updates SET isSyncing = :syncing WHERE id = :id")
+    suspend fun setSync(id: Long, syncing: Boolean)
+
+    @Query("UPDATE pending_updates SET retryCount = retryCount + 1, isSyncing = 0 WHERE id = :id")
+    suspend fun incrementRetry(id: Long)
+
+    @Query("DELETE FROM pending_updates WHERE retryCount > 5")
+    suspend fun deleteFailedUpdates()
+}
+
