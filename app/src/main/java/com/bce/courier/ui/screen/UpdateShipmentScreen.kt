@@ -40,6 +40,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import com.bce.courier.data.model.ShipmentItem
+import com.bce.courier.data.model.DeliveryStatus
+import com.bce.courier.data.model.PendingReasons
 import com.bce.courier.tracking.CourierTrackingConfig
 import com.bce.courier.tracking.CourierTrackingLocationStore
 import com.bce.courier.util.LocationHelper
@@ -53,10 +55,16 @@ import java.util.Locale
 fun UpdateShipmentScreen(
     shipment: ShipmentItem,
     onBack: () -> Unit,
-    onUpdate: (status: String, notes: String, location: Location?, photoUri: Uri?, isCameraPhoto: Boolean) -> Unit,
+    onUpdate: (
+        status: String,
+        notes: String,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
+        location: Location?,
+        photoUri: Uri?,
+        isCameraPhoto: Boolean,
+    ) -> Unit,
     isUpdating: Boolean,
-    isLockedToDelivered: Boolean = false,
-    onRefresh: () -> Unit = {}
 ) {
     val isDarkTheme = isSystemInDarkTheme()
 
@@ -78,6 +86,8 @@ fun UpdateShipmentScreen(
         mutableStateOf("delivered")
     }
     var notes by remember { mutableStateOf("") }
+    var pendingReasonCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingReasonNote by rememberSaveable { mutableStateOf("") }
     var photoUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var location by remember { mutableStateOf<Location?>(null) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
@@ -115,7 +125,12 @@ fun UpdateShipmentScreen(
         return FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
     }
     
-    val statuses = if (isLockedToDelivered) listOf("delivered") else listOf("shipped", "delivered")
+    val isDeliveredShipment = DeliveryStatus.isDelivered(shipment.current_status)
+    val statuses = if (isDeliveredShipment) {
+        listOf(DeliveryStatus.DELIVERED)
+    } else {
+        listOf(DeliveryStatus.PENDING, DeliveryStatus.DELIVERED)
+    }
     
     LaunchedEffect(Unit) {
         val cachedTrackingLocation = CourierTrackingLocationStore.getFreshLocation(
@@ -132,23 +147,7 @@ fun UpdateShipmentScreen(
         }
     }
 
-    var wasUpdating by remember { mutableStateOf(false) }
-    var showSuccess by remember { mutableStateOf(false) }
-
-    LaunchedEffect(isUpdating) {
-        if (isUpdating) {
-            wasUpdating = true
-            showSuccess = false
-        } else if (wasUpdating) {
-            showSuccess = true
-            wasUpdating = false
-            kotlinx.coroutines.delay(1500)
-            showSuccess = false
-            onRefresh()
-            onBack()
-        }
-    }
-
+    val showSuccess = false
     val overlayVisible = isUpdating
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -206,10 +205,17 @@ fun UpdateShipmentScreen(
                     statuses.forEach { status ->
                         FilterChip(
                             selected = selectedStatus == status,
-                            onClick = { if (!isLockedToDelivered) selectedStatus = status },
+                            onClick = {
+                                if (!isDeliveredShipment && selectedStatus != status) {
+                                    selectedStatus = status
+                                    notes = ""
+                                    pendingReasonCode = null
+                                    pendingReasonNote = ""
+                                }
+                            },
                             label = {
                                 val label = when(status) {
-                                    "shipped" -> "PENDING"
+                                    DeliveryStatus.PENDING -> "PENDING"
                                     "delivered" -> "DELIVERED"
                                     else -> status.replace("_", " ").uppercase()
                                 }
@@ -222,6 +228,48 @@ fun UpdateShipmentScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
+                if (selectedStatus == DeliveryStatus.PENDING) {
+                    Text(
+                        "Alasan Pending *",
+                        modifier = Modifier.align(Alignment.Start),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        PendingReasons.all.forEach { reason ->
+                            FilterChip(
+                                selected = pendingReasonCode == reason.code,
+                                onClick = {
+                                    pendingReasonCode = reason.code
+                                    if (reason.code != PendingReasons.OTHER) pendingReasonNote = ""
+                                },
+                                label = { Text(reason.label, fontSize = 12.sp) },
+                                leadingIcon = if (pendingReasonCode == reason.code) {
+                                    { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                } else null,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+
+                    if (pendingReasonCode == PendingReasons.OTHER) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = pendingReasonNote,
+                            onValueChange = { pendingReasonNote = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Keterangan lainnya *") },
+                            minLines = 2,
+                            maxLines = 3,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+                        )
+                    }
+                } else {
                 Text("Catatan (Opsional)", modifier = Modifier.align(Alignment.Start), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(6.dp))
 
@@ -308,6 +356,7 @@ fun UpdateShipmentScreen(
                         textStyle = LocalTextStyle.current.copy(fontSize = 13.sp)
                     )
                 }
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
@@ -371,7 +420,11 @@ fun UpdateShipmentScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                val canSubmit = photoUri != null
+                val hasValidPendingReason = selectedStatus != DeliveryStatus.PENDING || (
+                    PendingReasons.isValid(pendingReasonCode) &&
+                        (pendingReasonCode != PendingReasons.OTHER || pendingReasonNote.isNotBlank())
+                    )
+                val canSubmit = photoUri != null && hasValidPendingReason && !isDeliveredShipment
 
                 AnimatedVisibility(
                     visible = canSubmit,
@@ -386,7 +439,19 @@ fun UpdateShipmentScreen(
                         }
 
                         Button(
-                            onClick = { if (!isUpdating) onUpdate(selectedStatus, notes, location, photoUri, isCameraPhoto) },
+                            onClick = {
+                                if (!isUpdating) {
+                                    onUpdate(
+                                        selectedStatus,
+                                        notes,
+                                        pendingReasonCode,
+                                        pendingReasonNote.trim().ifBlank { null },
+                                        location,
+                                        photoUri,
+                                        isCameraPhoto,
+                                    )
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth().height(48.dp),
                             enabled = buttonEnabled,
                             shape = MaterialTheme.shapes.medium,
@@ -455,7 +520,13 @@ fun UpdateShipmentScreen(
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
-                                "Upload foto terlebih dahulu untuk melanjutkan",
+                                when {
+                                    isDeliveredShipment -> "AWB ini sudah Delivered"
+                                    photoUri == null -> "Upload foto terlebih dahulu untuk melanjutkan"
+                                    pendingReasonCode == null -> "Pilih alasan Pending terlebih dahulu"
+                                    pendingReasonCode == PendingReasons.OTHER && pendingReasonNote.isBlank() -> "Isi keterangan alasan Lainnya"
+                                    else -> "Lengkapi data update terlebih dahulu"
+                                },
                                 fontSize = 12.sp,
                                 color = warningTextColor
                             )

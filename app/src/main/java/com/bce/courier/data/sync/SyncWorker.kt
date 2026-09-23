@@ -56,6 +56,7 @@ class SyncWorker(
         try {
             val db = AppDatabase.getInstance(applicationContext)
             val dao = db.pendingUpdateDao()
+            dao.resetInterruptedSyncs()
 
             val pending = dao.getNextPending() ?: return@withContext Result.success()
 
@@ -78,17 +79,16 @@ class SyncWorker(
                     )
 
                     if (photoUrl == null) {
-                        dao.incrementRetry(pending.id)
-                        return@withContext if (pending.retryCount < 5) {
+                        val error = "Upload foto gagal"
+                        val nextRetryCount = pending.retryCount + 1
+                        return@withContext if (nextRetryCount < MAX_RETRIES) {
+                            dao.incrementRetry(pending.id, error)
                             Result.retry()
                         } else {
-                            dao.delete(pending.id)
-                            file.delete()
+                            dao.markFailed(pending.id, error)
                             Result.failure()
                         }
                     }
-
-                    file.delete()
                 }
 
                 var finalLocationAddress = pending.locationAddress
@@ -100,6 +100,8 @@ class SyncWorker(
                     awb = pending.awb,
                     status = pending.status,
                     notes = pending.notes,
+                    pendingReasonCode = pending.pendingReasonCode,
+                    pendingReasonNote = pending.pendingReasonNote,
                     lat = pending.latitude,
                     lng = pending.longitude,
                     photoUrl = photoUrl,
@@ -112,6 +114,7 @@ class SyncWorker(
 
                 if (result.isSuccess) {
                     dao.delete(pending.id)
+                    pending.photoPath?.let { runCatching { File(it).delete() } }
 
                     sendRefreshBroadcast()
 
@@ -120,21 +123,23 @@ class SyncWorker(
                     }
                     Result.success()
                 } else {
-                    dao.incrementRetry(pending.id)
-
-                    if (pending.retryCount < 5) {
+                    val error = result.exceptionOrNull()?.message ?: "Sinkronisasi gagal"
+                    val nextRetryCount = pending.retryCount + 1
+                    if (nextRetryCount < MAX_RETRIES) {
+                        dao.incrementRetry(pending.id, error)
                         Result.retry()
                     } else {
-                        dao.deleteFailedUpdates()
+                        dao.markFailed(pending.id, error)
                         Result.failure()
                     }
                 }
-            } catch (_: Exception) {
-                dao.incrementRetry(pending.id)
-
-                if (pending.retryCount < 5) {
+            } catch (error: Exception) {
+                val nextRetryCount = pending.retryCount + 1
+                if (nextRetryCount < MAX_RETRIES) {
+                    dao.incrementRetry(pending.id, error.message)
                     Result.retry()
                 } else {
+                    dao.markFailed(pending.id, error.message)
                     Result.failure()
                 }
             }
@@ -152,6 +157,7 @@ class SyncWorker(
 
     companion object {
         private const val WORK_NAME = "shipment_sync"
+        private const val MAX_RETRIES = 5
 
         fun enqueueSyncWork(context: Context) {
             val constraints = Constraints.Builder()

@@ -20,6 +20,9 @@ data class CachedShipmentEntity(
     val createdAt: String,
     val updatedAt: String?,
     val assignedCourierId: String?,
+    val pendingReasonCode: String?,
+    val pendingReasonNote: String?,
+    val pendingAt: String?,
     val cachedAt: Long,
 ) {
     fun toShipmentItem() = ShipmentItem(
@@ -34,6 +37,9 @@ data class CachedShipmentEntity(
         created_at = createdAt,
         updated_at = updatedAt,
         courier_id = assignedCourierId,
+        pending_reason_code = pendingReasonCode,
+        pending_reason_note = pendingReasonNote,
+        pending_at = pendingAt,
     )
 
     companion object {
@@ -54,6 +60,9 @@ data class CachedShipmentEntity(
             createdAt = shipment.created_at,
             updatedAt = shipment.updated_at,
             assignedCourierId = shipment.courier_id,
+            pendingReasonCode = shipment.pending_reason_code,
+            pendingReasonNote = shipment.pending_reason_note,
+            pendingAt = shipment.pending_at,
             cachedAt = cachedAt,
         )
     }

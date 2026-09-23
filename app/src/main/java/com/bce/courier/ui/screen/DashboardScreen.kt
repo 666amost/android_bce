@@ -2,6 +2,7 @@ package com.bce.courier.ui.screen
 
 import android.content.Context
 import android.content.Intent
+import android.location.Location
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.core.animateDpAsState
@@ -44,7 +45,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.lerp
 import com.bce.courier.tracking.CourierTrackingStatus
+import com.bce.courier.tracking.CourierTrackingLocationStore
 import com.bce.courier.ui.component.NearbyCouriersDialog
+import com.bce.courier.util.LocationHelper
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -54,6 +57,8 @@ private val SUPPORT_CONTACTS = listOf(
     "RENA PGK" to "6282185998199",
     "AIDIL PNK" to "6289693418191"
 )
+
+private enum class AssignmentSortMode { SCAN_ORDER, NEAREST }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,6 +90,7 @@ fun DashboardScreen(
     onShipmentClick: (ShipmentItem) -> Unit,
     onShipmentMapClick: (ShipmentItem) -> Unit,
     onSearchScanClick: () -> Unit,
+    onDeliveryScanClick: () -> Unit,
     onContinuousScanClick: () -> Unit,
     onUpdateClick: () -> Unit,
     onPickupClick: () -> Unit,
@@ -102,6 +108,12 @@ fun DashboardScreen(
     var showSupportDialog by remember { mutableStateOf(false) }
     var showNearbyCouriers by remember { mutableStateOf(false) }
     var showScanModeDialog by remember { mutableStateOf(false) }
+    var assignmentSortMode by remember { mutableStateOf(AssignmentSortMode.SCAN_ORDER) }
+    var showAssignmentSortMenu by remember { mutableStateOf(false) }
+    var distanceByAwb by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
+    val geocodedDestinationCache = remember { mutableMapOf<String, Pair<Double, Double>?>() }
+    var isResolvingDistances by remember { mutableStateOf(false) }
+    var distanceSortMessage by remember { mutableStateOf<String?>(null) }
 
     var isOnline by remember { mutableStateOf(true) }
     val isTrackingActive = isOnline && trackingStatus == CourierTrackingStatus.ACTIVE
@@ -152,6 +164,72 @@ fun DashboardScreen(
         else shipments.filter {
             it.awb.contains(query, ignoreCase = true) ||
             it.recipient_name.contains(query, ignoreCase = true)
+        }
+    }
+
+    LaunchedEffect(assignmentSortMode, selectedTab, shipments) {
+        if (selectedTab != 0 || assignmentSortMode != AssignmentSortMode.NEAREST) return@LaunchedEffect
+
+        isResolvingDistances = true
+        distanceSortMessage = null
+        val resolved = linkedMapOf<String, Float>()
+        try {
+            val locationHelper = LocationHelper(context.applicationContext)
+            val courierLocation = CourierTrackingLocationStore.getFreshLocation(
+                context = context.applicationContext,
+                maxAgeMs = 60_000L,
+            ) ?: locationHelper.getCurrentLocationSuspend()
+
+            if (courierLocation == null) {
+                distanceSortMessage = "Lokasi kurir belum tersedia"
+            } else {
+                shipments.forEach { shipment ->
+                    val address = shipment.address.trim()
+                    if (address.isBlank() || address.equals("Auto Generated", ignoreCase = true)) {
+                        return@forEach
+                    }
+                    val destination = if (geocodedDestinationCache.containsKey(address)) {
+                        geocodedDestinationCache[address]
+                    } else {
+                        locationHelper.geocodeAddressToLatLngSuspend(address).also {
+                            geocodedDestinationCache[address] = it
+                        }
+                    } ?: return@forEach
+                    val result = FloatArray(1)
+                    Location.distanceBetween(
+                        courierLocation.latitude,
+                        courierLocation.longitude,
+                        destination.first,
+                        destination.second,
+                        result,
+                    )
+                    resolved[shipment.awb] = result[0]
+                }
+                if (resolved.isEmpty()) {
+                    distanceSortMessage = "Jarak alamat belum tersedia"
+                }
+            }
+        } catch (_: SecurityException) {
+            distanceSortMessage = "Izin lokasi diperlukan untuk urut jarak"
+        } catch (_: Exception) {
+            distanceSortMessage = "Jarak gagal dihitung"
+        } finally {
+            distanceByAwb = resolved
+            isResolvingDistances = false
+        }
+    }
+
+    val orderedShipments = remember(filteredShipments, selectedTab, assignmentSortMode, distanceByAwb) {
+        if (selectedTab != 0 || assignmentSortMode == AssignmentSortMode.SCAN_ORDER) {
+            filteredShipments
+        } else {
+            filteredShipments.withIndex()
+                .sortedWith(
+                    compareBy<IndexedValue<ShipmentItem>> { distanceByAwb[it.value.awb] == null }
+                        .thenBy { distanceByAwb[it.value.awb] ?: Float.MAX_VALUE }
+                        .thenBy { it.index }
+                )
+                .map { it.value }
         }
     }
 
@@ -252,28 +330,110 @@ fun DashboardScreen(
 
                             DropdownMenu(
                                 expanded = showProfileMenu,
-                                onDismissRequest = { showProfileMenu = false }
+                                onDismissRequest = { showProfileMenu = false },
+                                modifier = Modifier.width(300.dp),
                             ) {
-                                DropdownMenuItem(
-                                    text = { Text("Bersihkan cache") },
-                                    onClick = {
-                                        showProfileMenu = false
-                                        onClearStorage()
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Surface(
+                                        modifier = Modifier.size(42.dp),
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = userName.trim().firstOrNull()?.uppercase() ?: "K",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 18.sp,
+                                            )
+                                        }
                                     }
-                                )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = userName,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = "Profil & pengaturan kurir",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                HorizontalDivider()
                                 DropdownMenuItem(
-                                    text = { Text("Kurir terdekat") },
+                                    text = {
+                                        Column {
+                                            Text("Kurir terdekat")
+                                            Text(
+                                                "Lihat posisi tim di sekitar",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.PeopleAlt, contentDescription = null) },
                                     onClick = {
                                         showProfileMenu = false
                                         showNearbyCouriers = true
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Support") },
+                                    text = {
+                                        Column {
+                                            Text("Bersihkan cache")
+                                            Text(
+                                                "Antrean offline dan POD tetap aman",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.CleaningServices, contentDescription = null) },
+                                    onClick = {
+                                        showProfileMenu = false
+                                        onClearStorage()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text("Bantuan & support")
+                                            Text(
+                                                "Hubungi tim operasional",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.HeadsetMic, contentDescription = null) },
                                     onClick = {
                                         showProfileMenu = false
                                         showSupportDialog = true
                                     }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Keluar", color = MaterialTheme.colorScheme.error) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.ExitToApp,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.error,
+                                        )
+                                    },
+                                    onClick = {
+                                        showProfileMenu = false
+                                        onLogout()
+                                    },
                                 )
                             }
                         }
@@ -324,9 +484,6 @@ fun DashboardScreen(
 
                         IconButton(onClick = onRefresh) {
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = topContentColor)
-                        }
-                        IconButton(onClick = onLogout) {
-                            Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Logout", tint = topContentColor)
                         }
                     }
 
@@ -632,17 +789,115 @@ fun DashboardScreen(
                             }
                         }
                     }
+                    if (selectedTab == 0) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surface,
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        text = "Urutan assignment",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Box {
+                                        TextButton(onClick = { showAssignmentSortMenu = true }) {
+                                            if (isResolvingDistances) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(16.dp),
+                                                    strokeWidth = 2.dp,
+                                                )
+                                            } else {
+                                                Icon(
+                                                    Icons.AutoMirrored.Filled.Sort,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                when (assignmentSortMode) {
+                                                    AssignmentSortMode.SCAN_ORDER -> "Urutan scan"
+                                                    AssignmentSortMode.NEAREST -> "Jarak terdekat"
+                                                }
+                                            )
+                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                        }
+                                        DropdownMenu(
+                                            expanded = showAssignmentSortMenu,
+                                            onDismissRequest = { showAssignmentSortMenu = false },
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Column {
+                                                        Text("Urutan scan")
+                                                        Text(
+                                                            "Kembali ke urutan assignment awal",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                },
+                                                leadingIcon = { Icon(Icons.Default.Schedule, contentDescription = null) },
+                                                onClick = {
+                                                    assignmentSortMode = AssignmentSortMode.SCAN_ORDER
+                                                    showAssignmentSortMenu = false
+                                                },
+                                            )
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Column {
+                                                        Text("Jarak terdekat")
+                                                        Text(
+                                                            "Dihitung dari alamat penerima",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                },
+                                                leadingIcon = { Icon(Icons.Default.NearMe, contentDescription = null) },
+                                                onClick = {
+                                                    assignmentSortMode = AssignmentSortMode.NEAREST
+                                                    showAssignmentSortMenu = false
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                                distanceSortMessage?.takeIf {
+                                    assignmentSortMode == AssignmentSortMode.NEAREST
+                                }?.let { message ->
+                                    Text(
+                                        text = message,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(bottom = 80.dp)
                         ) {
-                            items(filteredShipments, key = { it.awb }) { shipment ->
-                                val isOverduePending = selectedTab == 2 && isShipmentOverdue(shipment)
+                            items(orderedShipments, key = { it.awb }) { shipment ->
+                                val isOverdueShipment = (selectedTab == 0 || selectedTab == 2) && isShipmentOverdue(shipment)
                                 ShipmentCard(
                                     shipment = shipment,
                                     courierName = userName,
                                     isCompleted = selectedTab == 1,
-                                    highlightUrgent = isOverduePending,
+                                    highlightUrgent = isOverdueShipment,
+                                    distanceMeters = if (
+                                        selectedTab == 0 && assignmentSortMode == AssignmentSortMode.NEAREST
+                                    ) distanceByAwb[shipment.awb] else null,
                                     onClick = { onShipmentClick(shipment) },
                                     onMapClick = { onShipmentMapClick(shipment) }
                                 )
@@ -693,7 +948,7 @@ fun DashboardScreen(
                     OutlinedButton(
                         onClick = {
                             showScanModeDialog = false
-                            onSearchScanClick()
+                            onDeliveryScanClick()
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1003,6 +1258,7 @@ fun ShipmentCard(
     courierName: String,
     isCompleted: Boolean = false,
     highlightUrgent: Boolean = false,
+    distanceMeters: Float? = null,
     onClick: () -> Unit,
     onMapClick: (() -> Unit)? = null
 ) {
@@ -1147,20 +1403,14 @@ fun ShipmentCard(
 
     val context = LocalContext.current
     val showWhatsApp = remember(shipment.recipient_phone) { shouldShowWhatsApp(shipment.recipient_phone) }
-    val showMaps = remember(shipment.lat, shipment.lng, shipment.address) {
-        shipment.lat != null && shipment.lng != null || shouldShowMaps(shipment.address)
-    }
+    val showMaps = remember(shipment.address) { shouldShowMaps(shipment.address) }
     val formattedPhone = remember(shipment.recipient_phone) { formatPhoneForWhatsApp(shipment.recipient_phone) }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(
-                enabled = shipment.current_status.lowercase() != "delivered",
-                onClick = onClick
-            ),
+            .clip(RoundedCornerShape(16.dp)),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.cardColors(containerColor = cardColor)
     ) {
@@ -1174,8 +1424,28 @@ fun ShipmentCard(
                     text = shipment.awb,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.primary
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                distanceMeters?.let { meters ->
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        shape = RoundedCornerShape(99.dp),
+                    ) {
+                        Text(
+                            text = formatDistance(meters),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 StatusBadge(status = shipment.current_status, highlightUrgent = highlightUrgent)
             }
 
@@ -1252,9 +1522,7 @@ fun ShipmentCard(
                             if (onMapClick != null) {
                                 onMapClick()
                             } else {
-                                val query = shipment.address.ifBlank {
-                                    listOfNotNull(shipment.lat, shipment.lng).joinToString(",")
-                                }
+                                val query = shipment.address
                                 val mapsUri = "https://www.google.com/maps/search/?api=1&query=${Uri.encode(query)}".toUri()
                                 val mapIntent = Intent(Intent.ACTION_VIEW, mapsUri)
                                 runCatching { context.startActivity(mapIntent) }
@@ -1292,13 +1560,18 @@ fun ShipmentCard(
     }
 }
 
+private fun formatDistance(meters: Float): String = when {
+    meters < 1_000f -> "${meters.toInt()} m"
+    else -> String.format(Locale("id", "ID"), "%.1f km", meters / 1_000f)
+}
+
 @Composable
 fun StatusBadge(status: String, highlightUrgent: Boolean = false) {
     val (color, label) = when (status.lowercase()) {
         "delivered" -> Color(0xFF4CAF50) to "SELESAI"
         "out_for_delivery" -> if (highlightUrgent) Color(0xFFFFC107) to "SEGERA ANTAR" else Color(0xFF2196F3) to "ANTAR"
         "failed" -> Color(0xFFF44336) to "GAGAL"
-        "shipped" -> Color(0xFFFF9800) to "TRANSIT"
+        "pending", "shipped" -> Color(0xFFFF9800) to "PENDING"
         else -> Color.Gray to status.uppercase()
     }
 

@@ -39,7 +39,7 @@ object StorageCleaner {
 
         val appContext = context.applicationContext
 
-        deleteMatching(appContext.cacheDir) { it.name.startsWith("pending_") && it.name.endsWith(".jpg") }
+        // `pending_*.jpg` may be referenced by the offline upload queue. Never delete it here.
         deleteMatching(appContext.cacheDir) { it.name.startsWith("JPEG_") && it.name.endsWith(".jpg") }
         deleteMatching(appContext.cacheDir) { it.name.startsWith("compressed_") && it.name.endsWith(".jpg") }
 
@@ -52,4 +52,3 @@ object StorageCleaner {
         return StorageCleanupResult(deletedFiles = deletedFiles, deletedBytes = deletedBytes)
     }
 }
-

@@ -58,6 +58,7 @@ import com.bce.courier.ui.component.ContinuousScannerDialog
 import com.bce.courier.ui.component.ScannedItem
 import com.bce.courier.ui.component.ScannerOverlay
 import com.bce.courier.ui.component.ScannerOverlayScanEffect
+import com.bce.courier.ui.component.ShipmentScanDetailDialog
 import com.bce.courier.ui.component.ForceUpdateDialog
 import com.bce.courier.ui.screen.DashboardScreen
 import com.bce.courier.ui.screen.LoginScreen
@@ -84,7 +85,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-enum class ScanMode { NONE, SEARCH, CONTINUOUS, BULK_UPDATE }
+enum class ScanMode { NONE, SEARCH, DELIVERY, CONTINUOUS, BULK_UPDATE }
 
 private const val KEY_CORE_PERMISSIONS_REQUESTED = "core_permissions_requested"
 private const val KEY_LAST_LOCATION_ENABLED = "last_location_enabled"
@@ -263,6 +264,12 @@ class MainActivity : ComponentActivity() {
 
     private val utcTz: TimeZone = TimeZone.getTimeZone("UTC")
 
+    private fun formatStorageSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+        bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
     private fun parseUtcTimestamp(value: String?): Date? {
         if (value.isNullOrBlank()) return null
         return try {
@@ -273,25 +280,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startOfTodayUtc(): Date = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 0)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }.time
-
     private fun oneDayAgoIso(): String {
         val cal = Calendar.getInstance()
         cal.add(Calendar.DAY_OF_YEAR, -1)
         return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = utcTz }.format(cal.time)
     }
-
-    private fun isAssignedToday(item: ShipmentItem, todayStart: Date): Boolean =
-        item.current_status == "out_for_delivery" && parseUtcTimestamp(item.created_at)?.after(todayStart) == true
-
-    private fun isPendingPrevious(item: ShipmentItem, todayStart: Date): Boolean =
-        (item.current_status == "out_for_delivery" || item.current_status == "shipped") &&
-            parseUtcTimestamp(item.created_at)?.before(todayStart) == true
 
     private fun buildShipmentFilters(userId: String): Map<String, String> = mapOf(
         "courier_id" to "eq.$userId",
@@ -480,11 +473,15 @@ class MainActivity : ComponentActivity() {
                 var scanMode by remember { mutableStateOf(ScanMode.NONE) }
                 var scannedItems by remember { mutableStateOf<List<ScannedItem>>(emptyList()) }
                 var lastScanStatus by remember { mutableStateOf("none") }
-                var isLockedToDelivered by remember { mutableStateOf(false) }
                 var isBulkProcessing by remember { mutableStateOf(false) }
                 var bulkProcessingStatus by remember { mutableStateOf("") }
                 var bulkAwbText by remember { mutableStateOf("") }
                 var isSearchScanProcessing by remember { mutableStateOf(false) }
+                var scannedDetailAwb by remember { mutableStateOf<String?>(null) }
+                var scannedDetailShipment by remember { mutableStateOf<ShipmentItem?>(null) }
+                var scannedDetailIsRegistered by remember { mutableStateOf(false) }
+                var scannedDetailOwnerName by remember { mutableStateOf<String?>(null) }
+                var isScanDetailActionProcessing by remember { mutableStateOf(false) }
 
                 val processingAwbs = remember { mutableStateListOf<String>() }
                 val successfulAwbs = remember { ContinuousScanSession() }
@@ -644,13 +641,25 @@ class MainActivity : ComponentActivity() {
                     isShowingDashboardCache = fromCache
                     dashboardCacheUpdatedAt = cacheUpdatedAt
 
-                    val todayStart = startOfTodayUtc()
-                    assignedCount = body.count { isAssignedToday(it, todayStart) }
-                    completedCount = body.count { it.current_status == "delivered" }
-                    val pendingList = body.filter { isPendingPrevious(it, todayStart) }
+                    val nowMs = System.currentTimeMillis()
+                    fun assignmentTimeMs(item: ShipmentItem): Long? =
+                        parseUtcTimestamp(item.updated_at ?: item.created_at)?.time
+                    fun isAssigned(item: ShipmentItem): Boolean = DashboardShipmentGrouping.isAssigned(
+                        status = item.current_status,
+                        assignedAtMs = assignmentTimeMs(item),
+                        nowMs = nowMs,
+                    )
+                    fun isPending(item: ShipmentItem): Boolean = DashboardShipmentGrouping.isPending(
+                        status = item.current_status,
+                        assignedAtMs = assignmentTimeMs(item),
+                        nowMs = nowMs,
+                    )
+
+                    assignedCount = body.count(::isAssigned)
+                    completedCount = body.count { DeliveryStatus.isDelivered(it.current_status) }
+                    val pendingList = body.filter(::isPending)
                     pendingCount = pendingList.size
 
-                    val nowMs = System.currentTimeMillis()
                     fun ageDays(item: ShipmentItem): Long {
                         val created = parseUtcTimestamp(item.created_at)?.time ?: return 0L
                         return (nowMs - created) / (24L * 60L * 60L * 1000L)
@@ -878,12 +887,18 @@ class MainActivity : ComponentActivity() {
 
                 // Filter shipments for current tab display
                 val displayedShipments = remember(allShipments, selectedTab) {
-                    val todayStart = startOfTodayUtc()
+                    val nowMs = System.currentTimeMillis()
+                    fun assignedAtMs(item: ShipmentItem): Long? =
+                        parseUtcTimestamp(item.updated_at ?: item.created_at)?.time
                     when (selectedTab) {
-                        0 -> allShipments.filter { isAssignedToday(it, todayStart) }
-                        1 -> allShipments.filter { it.current_status == "delivered" }
+                        0 -> allShipments.filter {
+                            DashboardShipmentGrouping.isAssigned(it.current_status, assignedAtMs(it), nowMs)
+                        }
+                        1 -> allShipments.filter { DeliveryStatus.isDelivered(it.current_status) }
                             .sortedByDescending { it.updated_at ?: it.created_at }
-                        2 -> allShipments.filter { isPendingPrevious(it, todayStart) }
+                        2 -> allShipments.filter {
+                            DashboardShipmentGrouping.isPending(it.current_status, assignedAtMs(it), nowMs)
+                        }
                         else -> allShipments
                     }
                 }
@@ -1051,7 +1066,6 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onShipmentClick = { shipmentItem ->
-                                    isLockedToDelivered = false
                                     val normalized = normalizeAwb(shipmentItem.awb) ?: shipmentItem.awb
                                     navController.navigate("update_shipment/$normalized")
                                 },
@@ -1061,6 +1075,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onSearchScanClick = { 
                                     scanMode = ScanMode.SEARCH 
+                                },
+                                onDeliveryScanClick = {
+                                    scanMode = ScanMode.DELIVERY
                                 },
                                 onContinuousScanClick = { 
                                     scannedItems = emptyList()
@@ -1073,7 +1090,7 @@ class MainActivity : ComponentActivity() {
                                      val result = StorageCleaner.clearAppStorage(appContext)
                                      Toast.makeText(
                                          appContext,
-                                         "Cache dibersihkan: ${result.deletedFiles} file",
+                                         "Cache dibersihkan: ${result.deletedFiles} file (${formatStorageSize(result.deletedBytes)})",
                                          Toast.LENGTH_SHORT
                                      ).show()
                                  },
@@ -1089,6 +1106,62 @@ class MainActivity : ComponentActivity() {
                                     startInstallUpdate()
                                 }
                             )
+
+                            scannedDetailAwb?.let { detailAwb ->
+                                val currentCourierId = sessionManager.getUserId().orEmpty()
+                                ShipmentScanDetailDialog(
+                                    awb = detailAwb,
+                                    shipment = scannedDetailShipment,
+                                    isRegisteredShipment = scannedDetailIsRegistered,
+                                    currentCourierId = currentCourierId,
+                                    ownerName = scannedDetailOwnerName,
+                                    isProcessing = isScanDetailActionProcessing,
+                                    onDismiss = {
+                                        scannedDetailAwb = null
+                                        scannedDetailShipment = null
+                                        scannedDetailIsRegistered = false
+                                        scannedDetailOwnerName = null
+                                    },
+                                    onUpdateStatus = {
+                                        scannedDetailAwb = null
+                                        val normalized = normalizeAwb(detailAwb) ?: detailAwb
+                                        navController.navigate("update_shipment/$normalized")
+                                    },
+                                    onAssignmentAction = {
+                                        if (currentCourierId.isBlank()) return@ShipmentScanDetailDialog
+                                        isScanDetailActionProcessing = true
+                                        lifecycleScope.launch {
+                                            try {
+                                                val result = NetworkModule.shipmentRepository.assignShipmentToCourier(
+                                                    detailAwb,
+                                                    currentCourierId,
+                                                    sessionManager.getBestCourierName(),
+                                                )
+                                                when (result) {
+                                                    is AssignmentOutcome.Delivered -> {
+                                                        Toast.makeText(appContext, "AWB sudah Delivered", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                    is AssignmentOutcome.Failed -> {
+                                                        Toast.makeText(appContext, result.message, Toast.LENGTH_LONG).show()
+                                                    }
+                                                    else -> {
+                                                        val refreshed = NetworkModule.shipmentRepository
+                                                            .lookupShipmentDetailsByAwb(detailAwb)
+                                                            .getOrNull()
+                                                        scannedDetailShipment = refreshed?.shipment ?: scannedDetailShipment
+                                                        scannedDetailIsRegistered = refreshed?.isRegisteredShipment == true
+                                                        scannedDetailOwnerName = sessionManager.getBestCourierName()
+                                                        loadShipments(false)
+                                                        Toast.makeText(appContext, "Assignment berhasil diperbarui", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            } finally {
+                                                isScanDetailActionProcessing = false
+                                            }
+                                        }
+                                    },
+                                )
+                            }
 
                             if (showBulkDialog) {
                                 BulkUpdateDialog(
@@ -1144,8 +1217,9 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            if (scanMode == ScanMode.SEARCH) {
-                                var searchScanStatus by remember { mutableStateOf("none") }
+                            if (scanMode == ScanMode.SEARCH || scanMode == ScanMode.DELIVERY) {
+                                val isDeliveryScan = scanMode == ScanMode.DELIVERY
+                                var searchScanStatus by remember(scanMode) { mutableStateOf("none") }
                                 val searchBorderColor by animateColorAsState(
                                     targetValue = when (searchScanStatus) {
                                         "success" -> Color(0xFF4CAF50)
@@ -1178,6 +1252,14 @@ class MainActivity : ComponentActivity() {
                                                         return@ScannerView
                                                     }
 
+                                                    if (isDeliveryScan) {
+                                                        searchScanStatus = "success"
+                                                        playSound(R.raw.scan_success)
+                                                        scanMode = ScanMode.NONE
+                                                        navController.navigate("update_shipment/$awb")
+                                                        return@ScannerView
+                                                    }
+
                                                     isSearchScanProcessing = true
                                                     lifecycleScope.launch {
                                                         try {
@@ -1191,58 +1273,31 @@ class MainActivity : ComponentActivity() {
                                                                 return@launch
                                                             }
 
-                                                            val courierName = sessionManager.getBestCourierName()
-
-                                                            val cached = allShipments.find { it.awb == awb }
-                                                            if (cached?.current_status == "delivered") {
-                                                                searchScanStatus = "error"
-                                                                playSound(R.raw.scan_error)
-                                                                Toast.makeText(
-                                                                    appContext,
-                                                                    "Resi sudah DELIVERED dan tidak bisa discan lagi",
-                                                                    Toast.LENGTH_SHORT
-                                                                ).show()
-                                                                return@launch
+                                                            val lookup = NetworkModule.shipmentRepository.lookupShipmentDetailsByAwb(awb)
+                                                            if (lookup.isFailure) {
+                                                                throw lookup.exceptionOrNull() ?: IllegalStateException("Gagal mencari AWB")
+                                                            }
+                                                            val lookupResult = lookup.getOrThrow()
+                                                            val foundShipment = lookupResult.shipment
+                                                            val ownerId = foundShipment?.courier_id
+                                                            val ownerName = when {
+                                                                ownerId.isNullOrBlank() -> null
+                                                                ownerId == userId -> sessionManager.getBestCourierName()
+                                                                else -> fetchUserNameFromUsersTable(ownerId)
                                                             }
 
-                                                            if (cached == null) {
-                                                                val result = NetworkModule.shipmentRepository.assignShipmentToCourier(awb, userId, courierName)
-                                                                when (result) {
-                                                                    is AssignmentOutcome.Delivered -> {
-                                                                        searchScanStatus = "error"
-                                                                        playSound(R.raw.scan_error)
-                                                                        Toast.makeText(
-                                                                            appContext,
-                                                                            "Resi sudah DELIVERED dan tidak bisa discan lagi",
-                                                                            Toast.LENGTH_LONG
-                                                                        ).show()
-                                                                        return@launch
-                                                                    }
-                                                                    is AssignmentOutcome.Failed -> {
-                                                                        searchScanStatus = "error"
-                                                                        playSound(R.raw.scan_error)
-                                                                        Toast.makeText(
-                                                                            appContext,
-                                                                            "Gagal menambahkan resi: ${result.message}",
-                                                                            Toast.LENGTH_LONG
-                                                                        ).show()
-                                                                        return@launch
-                                                                    }
-                                                                    else -> Unit
-                                                                }
-                                                            }
-
+                                                            scannedDetailAwb = awb
+                                                            scannedDetailShipment = foundShipment
+                                                            scannedDetailIsRegistered = lookupResult.isRegisteredShipment
+                                                            scannedDetailOwnerName = ownerName
                                                             searchScanStatus = "success"
                                                             playSound(R.raw.scan_success)
                                                             scanMode = ScanMode.NONE
-                                                            isLockedToDelivered = (cached?.current_status == "out_for_delivery")
-                                                            navController.navigate("update_shipment/$awb")
-                                                            loadShipments(false)
                                                         } catch (e: Exception) {
                                                             searchScanStatus = "error"
                                                             playSound(R.raw.scan_error)
                                                             Log.e("MainActivity", "Error in search scan", e)
-                                                            Toast.makeText(appContext, "Terjadi kesalahan: ${'$'}{e.message}", Toast.LENGTH_LONG).show()
+                                                            Toast.makeText(appContext, "Terjadi kesalahan: ${e.message}", Toast.LENGTH_LONG).show()
                                                         } finally {
                                                             isSearchScanProcessing = false
                                                         }
@@ -1252,7 +1307,7 @@ class MainActivity : ComponentActivity() {
 
                                             ScannerOverlay(
                                                 borderColor = searchBorderColor,
-                                                scanEffect = ScannerOverlayScanEffect.GoPay
+                                                scanEffect = ScannerOverlayScanEffect.None
                                             )
                                             
                                             // Header
@@ -1283,8 +1338,17 @@ class MainActivity : ComponentActivity() {
                                                 }
                                                 
                                                 Column(modifier = Modifier.align(Alignment.TopStart)) {
-                                                    Text("Cari & Update AWB", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                                    Text("Scan resi untuk update status", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                                                    Text(
+                                                        if (isDeliveryScan) "Scan Delivery" else "Cari Detail AWB",
+                                                        color = Color.White,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 20.sp,
+                                                    )
+                                                    Text(
+                                                        if (isDeliveryScan) "Scan resi untuk langsung update status" else "Scan untuk melihat detail dan pemilik",
+                                                        color = Color.White.copy(alpha = 0.7f),
+                                                        fontSize = 12.sp,
+                                                    )
                                                 }
                                             }
                                         }
@@ -1536,7 +1600,7 @@ class MainActivity : ComponentActivity() {
                                 UpdateShipmentScreen(
                                     shipment = resolvedShipment,
                                     onBack = { navController.popBackStack() },
-                                    onUpdate = { status, notes, location, photo, isCameraPhoto ->
+                                    onUpdate = { status, notes, pendingReasonCode, pendingReasonNote, location, photo, isCameraPhoto ->
                                         lifecycleScope.launch {
                                             isUpdatingStatus = true
                                             try {
@@ -1546,7 +1610,11 @@ class MainActivity : ComponentActivity() {
 
                                                 var photoPath: String? = null
                                                 if (photo != null) {
-                                                    val photoFile = File(cacheDir, "pending_${'$'}{resolvedShipment.awb}_${'$'}{System.currentTimeMillis()}.jpg")
+                                                    val pendingUploadDir = File(filesDir, "pending_uploads").apply { mkdirs() }
+                                                    val photoFile = File(
+                                                        pendingUploadDir,
+                                                        "pending_${resolvedShipment.awb}_${System.currentTimeMillis()}.jpg",
+                                                    )
                                                     photoPath = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                                         try {
                                                             contentResolver.openInputStream(photo)?.use { input ->
@@ -1585,6 +1653,8 @@ class MainActivity : ComponentActivity() {
                                                      awb = resolvedShipment.awb,
                                                      status = status,
                                                      notes = notes,
+                                                     pendingReasonCode = pendingReasonCode,
+                                                     pendingReasonNote = pendingReasonNote,
                                                      lat = location?.latitude,
                                                      lng = location?.longitude,
                                                      photo = photoPath,
@@ -1595,14 +1665,46 @@ class MainActivity : ComponentActivity() {
                                                      locationAddress = locationAddress
                                                  )
 
-                                                if (result.isSuccess) {
-                                                    if (status.lowercase() == "delivered") {
-                                                        playSound(R.raw.scan_delivered)
-                                                    }
-                                                    Toast.makeText(appContext, "Berhasil update status", Toast.LENGTH_SHORT).show()
-                                                    Log.d("MainActivity", "Successfully updated shipment $awb to status $status")
-                                                    loadShipments(false)
-                                                    navController.popBackStack()
+                                                 if (result.isSuccess) {
+                                                     val outcome = result.getOrThrow()
+                                                     val normalizedStatus = DeliveryStatus.normalized(status)
+                                                     val nowIso = SimpleDateFormat(
+                                                         "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                                                         Locale.US,
+                                                     ).apply { timeZone = utcTz }.format(Date())
+                                                     val optimisticShipments = allShipments.map { item ->
+                                                         if (item.awb != resolvedShipment.awb) item else item.copy(
+                                                             current_status = normalizedStatus,
+                                                             pending_reason_code = if (normalizedStatus == DeliveryStatus.PENDING) pendingReasonCode else null,
+                                                             pending_reason_note = if (normalizedStatus == DeliveryStatus.PENDING) pendingReasonNote else null,
+                                                             pending_at = if (normalizedStatus == DeliveryStatus.PENDING) nowIso else null,
+                                                             updated_at = nowIso,
+                                                         )
+                                                     }
+                                                     val updatedAt = System.currentTimeMillis()
+                                                     applyDashboardShipments(
+                                                         optimisticShipments,
+                                                         fromCache = outcome == DeliveryUpdateOutcome.QUEUED,
+                                                         cacheUpdatedAt = updatedAt,
+                                                     )
+                                                     NetworkModule.shipmentRepository.replaceDashboardCache(
+                                                         courierId = courierId,
+                                                         shipments = optimisticShipments,
+                                                         cachedAt = updatedAt,
+                                                     )
+
+                                                     if (normalizedStatus == DeliveryStatus.DELIVERED) {
+                                                         playSound(R.raw.scan_delivered)
+                                                     }
+                                                     val message = if (outcome == DeliveryUpdateOutcome.QUEUED) {
+                                                         "Disimpan offline, akan disinkronkan"
+                                                     } else {
+                                                         "Berhasil update status"
+                                                     }
+                                                     Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+                                                     Log.d("MainActivity", "Successfully updated shipment $awb to status $status")
+                                                     if (outcome == DeliveryUpdateOutcome.UPDATED) loadShipments(false)
+                                                     navController.popBackStack()
                                                 } else {
                                                     val errorMessage = result.exceptionOrNull()?.message ?: "Unknown error"
                                                     Log.e("MainActivity", "Failed to update shipment $awb: $errorMessage")
@@ -1617,12 +1719,6 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     isUpdating = isUpdatingStatus,
-                                    isLockedToDelivered = isLockedToDelivered,
-                                    onRefresh = {
-                                        lifecycleScope.launch {
-                                            loadShipments(false)
-                                        }
-                                    }
                                 )
                             } else {
                                 Box(

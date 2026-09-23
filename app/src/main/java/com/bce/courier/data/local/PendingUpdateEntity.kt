@@ -10,6 +10,8 @@ data class PendingUpdateEntity(
     val awb: String,
     val status: String,
     val notes: String?,
+    val pendingReasonCode: String?,
+    val pendingReasonNote: String?,
     val latitude: Double?,
     val longitude: Double?,
     val photoPath: String?,
@@ -21,6 +23,8 @@ data class PendingUpdateEntity(
     val timestamp: Long = System.currentTimeMillis(),
     val priority: Int = if (status.lowercase() == "delivered") 1 else 2,
     val retryCount: Int = 0,
-    val isSyncing: Boolean = false
+    val isSyncing: Boolean = false,
+    val syncState: String = "queued",
+    val lastError: String? = null,
 )
 

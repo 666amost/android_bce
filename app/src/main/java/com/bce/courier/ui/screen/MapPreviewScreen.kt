@@ -85,14 +85,10 @@ fun MapPreviewScreen(
         isLoading = true
         errorMessage = null
 
-        val dest = when {
-            shipment.lat != null && shipment.lng != null -> GeoPoint(shipment.lat, shipment.lng)
-            shipment.address.isNotBlank() -> {
-                locationHelper.geocodeAddressToLatLngSuspend(shipment.address)?.let { (lat, lng) ->
-                    GeoPoint(lat, lng)
-                }
+        val dest = shipment.address.trim().takeIf { it.isNotBlank() }?.let { receiverAddress ->
+            locationHelper.geocodeAddressToLatLngSuspend(receiverAddress)?.let { (lat, lng) ->
+                GeoPoint(lat, lng)
             }
-            else -> null
         }
         destinationLatLng = dest
 
@@ -104,7 +100,7 @@ fun MapPreviewScreen(
         }
 
         if (destinationLatLng == null) {
-            errorMessage = "Lokasi tujuan tidak tersedia (alamat/koordinat kosong)."
+            errorMessage = "Preview alamat tujuan tidak ditemukan. Navigasi Google Maps tetap dapat digunakan."
         }
 
         isLoading = false
@@ -278,24 +274,26 @@ fun MapPreviewScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = {
-                                val dest = destinationLatLng
-                                if (dest == null) {
-                                    Toast.makeText(context, "Lokasi tujuan tidak tersedia", Toast.LENGTH_SHORT).show()
+                                val receiverAddress = shipment.address.trim()
+                                if (receiverAddress.isBlank()) {
+                                    Toast.makeText(context, "Alamat tujuan tidak tersedia", Toast.LENGTH_SHORT).show()
                                     return@Button
                                 }
-                                val gmmIntentUri =
-                                    Uri.parse("google.navigation:q=${dest.latitude},${dest.longitude}&mode=l")
-                                val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).setPackage("com.google.android.apps.maps")
-                                val fallbackIntent = Intent(
-                                    Intent.ACTION_VIEW,
-                                    Uri.parse("https://www.google.com/maps/dir/?api=1&destination=${dest.latitude},${dest.longitude}")
+                                val directionsUri = Uri.parse(
+                                    "https://www.google.com/maps/dir/?api=1" +
+                                        "&destination=${Uri.encode(receiverAddress)}" +
+                                        "&travelmode=two-wheeler&dir_action=navigate"
                                 )
+                                val mapIntent = Intent(Intent.ACTION_VIEW, directionsUri)
+                                    .setPackage("com.google.android.apps.maps")
+                                val fallbackIntent = Intent(Intent.ACTION_VIEW, directionsUri)
                                 val opened = runCatching { context.startActivity(mapIntent); true }.getOrDefault(false) ||
                                     runCatching { context.startActivity(fallbackIntent); true }.getOrDefault(false)
                                 if (!opened) {
                                     Toast.makeText(context.applicationContext, "Tidak bisa membuka navigasi", Toast.LENGTH_SHORT).show()
                                 }
                             },
+                            enabled = shipment.address.isNotBlank(),
                             contentPadding = PaddingValues(horizontal = 12.dp)
                         ) {
                             Icon(Icons.Default.Directions, contentDescription = null)

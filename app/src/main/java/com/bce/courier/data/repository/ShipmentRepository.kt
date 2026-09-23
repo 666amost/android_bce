@@ -7,11 +7,16 @@ import com.bce.courier.data.api.BranchApiService
 import com.bce.courier.data.api.BranchScanKeluarRequest
 import com.bce.courier.data.api.BranchScanTtdRequest
 import com.bce.courier.data.model.ShipmentItem
+import com.bce.courier.data.model.ShipmentLookupResult
 import com.bce.courier.data.model.AppConfigResponse
 import com.bce.courier.data.local.AppDatabase
 import com.bce.courier.data.local.PendingUpdateEntity
 import com.bce.courier.data.local.CachedShipmentEntity
 import com.bce.courier.data.model.AssignmentOutcome
+import com.bce.courier.data.model.DeliveryStatus
+import com.bce.courier.data.model.DeliveryStatusUpdateRequest
+import com.bce.courier.data.model.DeliveryUpdateOutcome
+import com.bce.courier.data.model.PendingReasons
 import com.bce.courier.data.sync.SyncWorker
 import com.bce.courier.BuildConfig
 import retrofit2.Response
@@ -24,6 +29,7 @@ import java.net.ConnectException
 import javax.net.ssl.SSLException
 import java.net.UnknownServiceException
 import java.io.File
+import java.io.IOException
 
 class ShipmentRepository(
     private val apiService: CourierApiService,
@@ -74,6 +80,63 @@ class ShipmentRepository(
     suspend fun getShipments(filters: Map<String, String>): Response<List<ShipmentItem>> {
         return apiService.getShipments(filters)
     }
+
+    suspend fun lookupShipmentByAwb(awb: String): Result<ShipmentItem?> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanAwb = awb.trim().uppercase()
+            val response = apiService.getShipments(mapOf("awb_number" to "eq.$cleanAwb"))
+            if (!response.isSuccessful) {
+                throw HttpStatusException(response.code(), "Gagal mencari AWB")
+            }
+            response.body()?.firstOrNull()
+        }
+    }
+
+    suspend fun lookupShipmentDetailsByAwb(awb: String): Result<ShipmentLookupResult> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val cleanAwb = awb.trim().uppercase()
+                val response = apiService.getShipments(mapOf("awb_number" to "eq.$cleanAwb"))
+                if (!response.isSuccessful) {
+                    throw HttpStatusException(response.code(), "Gagal mencari AWB")
+                }
+
+                val registered = response.body()?.firstOrNull()
+                val manifest = checkManifest(cleanAwb)
+                val manifestName = manifest.firstValue("nama_penerima", "receiver_name", "penerima")
+                val manifestPhone = manifest.firstValue(
+                    "nomor_penerima",
+                    "no_penerima",
+                    "telepon_penerima",
+                    "receiver_phone",
+                )
+                val manifestAddress = manifest.firstValue("alamat_penerima", "receiver_address")
+                val manifestCod = manifest.codAmount()
+
+                val enriched = when {
+                    registered != null -> registered.copy(
+                        recipient_name = registered.recipient_name.preferRealValue(manifestName),
+                        recipient_phone = registered.recipient_phone.preferRealValue(manifestPhone),
+                        address = registered.address.preferRealValue(manifestAddress),
+                        cod_amount = registered.cod_amount.takeIf { it > 0.0 } ?: manifestCod,
+                    )
+                    manifest != null -> ShipmentItem(
+                        awb = cleanAwb,
+                        recipient_name = manifestName.orEmpty(),
+                        recipient_phone = manifestPhone.orEmpty(),
+                        address = manifestAddress.orEmpty(),
+                        cod_amount = manifestCod,
+                    )
+                    else -> null
+                }
+
+                ShipmentLookupResult(
+                    shipment = enriched,
+                    isRegisteredShipment = registered != null,
+                    hasManifestData = manifest != null,
+                )
+            }
+        }
 
     suspend fun checkManifest(awb: String): Map<String, String>? {
         val cleanAwb = awb.trim().uppercase()
@@ -208,13 +271,13 @@ class ShipmentRepository(
 
                     val shipment = mutableMapOf(
                         "awb_number" to cleanAwb,
-                        "sender_name" to (manifestData?.get("nama_pengirim") ?: "Auto Generated"),
-                        "sender_address" to (manifestData?.get("alamat_pengirim") ?: "Auto Generated"),
-                        "sender_phone" to (manifestData?.get("nomor_pengirim") ?: "Auto Generated"),
-                        "receiver_name" to (manifestData?.get("nama_penerima") ?: "Auto Generated"),
-                        "receiver_address" to (manifestData?.get("alamat_penerima") ?: "Auto Generated"),
-                        "receiver_phone" to (manifestData?.get("nomor_penerima") ?: "Auto Generated"),
-                        "weight" to (manifestData?.get("berat_kg") ?: "1"),
+                        "sender_name" to (manifestData.firstValue("nama_pengirim", "sender_name") ?: "Auto Generated"),
+                        "sender_address" to (manifestData.firstValue("alamat_pengirim", "sender_address") ?: "Auto Generated"),
+                        "sender_phone" to (manifestData.firstValue("nomor_pengirim", "no_pengirim", "sender_phone") ?: "Auto Generated"),
+                        "receiver_name" to (manifestData.firstValue("nama_penerima", "receiver_name", "penerima") ?: "Auto Generated"),
+                        "receiver_address" to (manifestData.firstValue("alamat_penerima", "receiver_address") ?: "Auto Generated"),
+                        "receiver_phone" to (manifestData.firstValue("nomor_penerima", "no_penerima", "telepon_penerima", "receiver_phone") ?: "Auto Generated"),
+                        "weight" to (manifestData.firstValue("berat_kg", "weight") ?: "1"),
                         "dimensions" to "10x10x10",
                         "service_type" to "Standard",
                         "current_status" to "out_for_delivery",
@@ -227,10 +290,13 @@ class ShipmentRepository(
                         return@withContext AssignmentOutcome.Failed(cleanAwb, "Gagal membuat resi")
                     }
                 } else {
-                    val updates = mapOf(
+                    val updates = mapOf<String, String?>(
                         "current_status" to "out_for_delivery",
                         "courier_id" to courierId,
-                        "updated_at" to timestamp
+                        "updated_at" to timestamp,
+                        "pending_reason_code" to null,
+                        "pending_reason_note" to null,
+                        "pending_at" to null,
                     )
                     val updateRes = apiService.updateShipment("eq.$cleanAwb", updates)
                     if (!updateRes.isSuccessful) {
@@ -280,6 +346,8 @@ class ShipmentRepository(
         awb: String,
         status: String,
         notes: String?,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
         lat: Double?,
         lng: Double?,
         photo: String?,
@@ -288,9 +356,9 @@ class ShipmentRepository(
         armada: String,
         platArmada: String,
         locationAddress: String? = null
-    ): Result<Unit> {
+    ): Result<DeliveryUpdateOutcome> {
         return updateShipmentInternal(
-            awb, status, notes, lat, lng, photo, courierName,
+            awb, status, notes, pendingReasonCode, pendingReasonNote, lat, lng, photo, courierName,
             courierId, armada, platArmada, locationAddress, saveToQueueOnError = true
         )
     }
@@ -299,6 +367,8 @@ class ShipmentRepository(
         awb: String,
         status: String,
         notes: String?,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
         lat: Double?,
         lng: Double?,
         photo: String?,
@@ -307,9 +377,9 @@ class ShipmentRepository(
         armada: String,
         platArmada: String,
         locationAddress: String? = null
-    ): Result<Unit> {
+    ): Result<DeliveryUpdateOutcome> {
         return updateShipmentInternal(
-            awb, status, notes, lat, lng, photo, courierName,
+            awb, status, notes, pendingReasonCode, pendingReasonNote, lat, lng, photo, courierName,
             courierId, armada, platArmada, locationAddress, saveToQueueOnError = false
         )
     }
@@ -318,6 +388,8 @@ class ShipmentRepository(
         awb: String,
         status: String,
         notes: String?,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
         lat: Double?,
         lng: Double?,
         photoUrl: String?,
@@ -327,70 +399,24 @@ class ShipmentRepository(
         platArmada: String,
         locationAddress: String? = null
     ): Result<Unit> {
-        return try {
-            val cleanAwb = awb.trim().uppercase()
+        val cleanStatus = DeliveryStatus.normalized(status)
+        val validationError = validateDeliveryUpdate(cleanStatus, pendingReasonCode, pendingReasonNote)
+        if (validationError != null) return Result.failure(IllegalArgumentException(validationError))
 
-            val updates = mutableMapOf(
-                "current_status" to status,
-                "courier_id" to courierId,
-                "updated_at" to java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                    timeZone = java.util.TimeZone.getTimeZone("UTC")
-                }.format(java.util.Date())
-            )
-
-            val supabaseResponse = apiService.updateShipment("eq.$cleanAwb", updates)
-            if (!supabaseResponse.isSuccessful) {
-                return Result.failure(Exception("Network error: ${supabaseResponse.code()}"))
-            }
-
-            try {
-                val historyNotes = if (notes.isNullOrBlank()) {
-                    "Updated by $courierName"
-                } else {
-                    "Updated by $courierName. $notes"
-                }
-                val historyData = mutableMapOf(
-                    "awb_number" to cleanAwb,
-                    "status" to status,
-                    "location" to (locationAddress ?: courierName),
-                    "notes" to historyNotes,
-                    "created_at" to java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                        timeZone = java.util.TimeZone.getTimeZone("UTC")
-                    }.format(java.util.Date())
-                )
-                photoUrl?.let { historyData["photo_url"] = it }
-                lat?.let { historyData["latitude"] = it.toString() }
-                lng?.let { historyData["longitude"] = it.toString() }
-
-                apiService.addHistory(historyData)
-            } catch (_: Exception) { }
-
-            if (status.lowercase() == "delivered") {
-                if (cleanAwb.startsWith("BE") && !photoUrl.isNullOrBlank()) {
-                    runCatching {
-                        val branchRequest = BranchScanTtdRequest(
-                            no_resi = cleanAwb,
-                            nama_kurir = courierName,
-                            armada = armada,
-                            plat_armada = platArmada,
-                            gambar = photoUrl,
-                            pemindai = courierName
-                        )
-                        val branchRes = branchApiService.syncScanTtd(BuildConfig.BRANCH_API_KEY, branchRequest)
-                        if (!branchRes.isSuccessful) {
-                            val err = runCatching { branchRes.errorBody()?.string() }.getOrNull()
-                            Log.w(tag, "Branch scanttd failed for $cleanAwb: ${branchRes.code()} ${err ?: ""}".trim())
-                        }
-                    }.onFailure { e ->
-                        Log.w(tag, "Branch scanttd error for $cleanAwb: ${e.message}", e)
-                    }
-                } else if (cleanAwb.startsWith("BE")) {
-                    Log.w(tag, "Skip branch scanttd for $cleanAwb: missing photoUrl")
-                }
-            }
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
+        return commitDeliveryStatus(
+            awb = awb,
+            status = cleanStatus,
+            notes = notes,
+            pendingReasonCode = pendingReasonCode,
+            pendingReasonNote = pendingReasonNote,
+            lat = lat,
+            lng = lng,
+            photoUrl = photoUrl,
+            courierName = courierName,
+            courierId = courierId,
+            locationAddress = locationAddress,
+        ).onSuccess {
+            syncDeliveredToBranch(awb, cleanStatus, photoUrl, courierName, armada, platArmada)
         }
     }
 
@@ -398,6 +424,8 @@ class ShipmentRepository(
         awb: String,
         status: String,
         notes: String?,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
         lat: Double?,
         lng: Double?,
         photo: String?,
@@ -407,9 +435,12 @@ class ShipmentRepository(
         platArmada: String,
         locationAddress: String?,
         saveToQueueOnError: Boolean
-    ): Result<Unit> {
+    ): Result<DeliveryUpdateOutcome> {
         return try {
             val cleanAwb = awb.trim().uppercase()
+            val cleanStatus = DeliveryStatus.normalized(status)
+            val validationError = validateDeliveryUpdate(cleanStatus, pendingReasonCode, pendingReasonNote)
+            if (validationError != null) return Result.failure(IllegalArgumentException(validationError))
 
             val photoFile = photo?.let { File(it) }?.takeIf { it.exists() }
             var photoUrl: String? = null
@@ -432,8 +463,10 @@ class ShipmentRepository(
                     if (saveToQueueOnError) {
                         val pendingUpdate = PendingUpdateEntity(
                             awb = cleanAwb,
-                            status = status,
+                            status = cleanStatus,
                             notes = notes,
+                            pendingReasonCode = pendingReasonCode,
+                            pendingReasonNote = pendingReasonNote,
                             latitude = lat,
                             longitude = lng,
                             photoPath = photo,
@@ -442,80 +475,37 @@ class ShipmentRepository(
                             armada = armada,
                             platArmada = platArmada,
                             locationAddress = locationAddress,
-                            priority = if (status.lowercase() == "delivered") 1 else 2
+                            priority = if (cleanStatus == DeliveryStatus.DELIVERED) 1 else 2
                         )
                         pendingDao.insert(pendingUpdate)
                         SyncWorker.enqueueSyncWork(context)
-                        return Result.success(Unit)
+                        return Result.success(DeliveryUpdateOutcome.QUEUED)
                     }
                     return Result.failure(Exception("Photo upload failed"))
                 }
             }
 
-            val updates = mutableMapOf(
-                "current_status" to status,
-                "courier_id" to courierId,
-                "updated_at" to java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                    timeZone = java.util.TimeZone.getTimeZone("UTC")
-                }.format(java.util.Date())
-            )
-
             try {
-                val supabaseResponse = apiService.updateShipment("eq.$cleanAwb", updates)
-                if (!supabaseResponse.isSuccessful) {
-                    throw Exception("Network error: ${supabaseResponse.code()}")
-                }
+                commitDeliveryStatus(
+                    awb = cleanAwb,
+                    status = cleanStatus,
+                    notes = notes,
+                    pendingReasonCode = pendingReasonCode,
+                    pendingReasonNote = pendingReasonNote,
+                    lat = lat,
+                    lng = lng,
+                    photoUrl = photoUrl,
+                    courierName = courierName,
+                    courierId = courierId,
+                    locationAddress = locationAddress,
+                ).getOrThrow()
 
-                try {
-                    val historyNotes = if (notes.isNullOrBlank()) {
-                        "Updated by $courierName"
-                    } else {
-                        "Updated by $courierName. $notes"
-                    }
-                    val historyData = mutableMapOf(
-                        "awb_number" to cleanAwb,
-                        "status" to status,
-                        "location" to (locationAddress ?: courierName),
-                        "notes" to historyNotes,
-                        "created_at" to java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                            timeZone = java.util.TimeZone.getTimeZone("UTC")
-                        }.format(java.util.Date())
-                    )
-                    photoUrl?.let { historyData["photo_url"] = it }
-                    lat?.let { historyData["latitude"] = it.toString() }
-                    lng?.let { historyData["longitude"] = it.toString() }
-
-                    apiService.addHistory(historyData)
-                } catch (_: Exception) { }
-
-                if (status.lowercase() == "delivered") {
-                    if (cleanAwb.startsWith("BE") && !photoUrl.isNullOrBlank()) {
-                        runCatching {
-                            val branchRequest = BranchScanTtdRequest(
-                                no_resi = cleanAwb,
-                                nama_kurir = courierName,
-                                armada = armada,
-                                plat_armada = platArmada,
-                                gambar = photoUrl,
-                                pemindai = courierName
-                            )
-                            val branchRes = branchApiService.syncScanTtd(BuildConfig.BRANCH_API_KEY, branchRequest)
-                            if (!branchRes.isSuccessful) {
-                                val err = runCatching { branchRes.errorBody()?.string() }.getOrNull()
-                                Log.w(tag, "Branch scanttd failed for $cleanAwb: ${branchRes.code()} ${err ?: ""}".trim())
-                            }
-                        }.onFailure { e ->
-                            Log.w(tag, "Branch scanttd error for $cleanAwb: ${e.message}", e)
-                        }
-                    } else if (cleanAwb.startsWith("BE")) {
-                        Log.w(tag, "Skip branch scanttd for $cleanAwb: missing photoUrl")
-                    }
-                }
+                syncDeliveredToBranch(cleanAwb, cleanStatus, photoUrl, courierName, armada, platArmada)
 
                 if (photoFile != null) {
                     runCatching { photoFile.delete() }
                 }
-                Result.success(Unit)
+                Result.success(DeliveryUpdateOutcome.UPDATED)
             } catch (e: Exception) {
                 when {
                     saveToQueueOnError && (
@@ -523,12 +513,16 @@ class ShipmentRepository(
                             e is UnknownHostException ||
                             e is ConnectException ||
                             e is UnknownServiceException ||
-                            e is SSLException
+                            e is SSLException ||
+                            e is IOException ||
+                            (e is HttpStatusException && e.retryable)
                         ) -> {
                         val pendingUpdate = PendingUpdateEntity(
                             awb = cleanAwb,
-                            status = status,
+                            status = cleanStatus,
                             notes = notes,
+                            pendingReasonCode = pendingReasonCode,
+                            pendingReasonNote = pendingReasonNote,
                             latitude = lat,
                             longitude = lng,
                             photoPath = photo,
@@ -537,11 +531,11 @@ class ShipmentRepository(
                             armada = armada,
                             platArmada = platArmada,
                             locationAddress = locationAddress,
-                            priority = if (status.lowercase() == "delivered") 1 else 2
+                            priority = if (cleanStatus == DeliveryStatus.DELIVERED) 1 else 2
                         )
                         pendingDao.insert(pendingUpdate)
                         SyncWorker.enqueueSyncWork(context)
-                        Result.success(Unit)
+                        Result.success(DeliveryUpdateOutcome.QUEUED)
                     }
                     else -> throw e
                 }
@@ -552,4 +546,140 @@ class ShipmentRepository(
     }
 
     fun observePendingCount() = pendingDao.observePendingCount()
+
+    private fun validateDeliveryUpdate(status: String, reasonCode: String?, reasonNote: String?): String? {
+        if (status != DeliveryStatus.PENDING && status != DeliveryStatus.DELIVERED) {
+            return "Status delivery tidak valid"
+        }
+        if (status == DeliveryStatus.PENDING && !PendingReasons.isValid(reasonCode)) {
+            return "Alasan Pending wajib dipilih"
+        }
+        if (status == DeliveryStatus.PENDING && reasonCode == PendingReasons.OTHER && reasonNote.isNullOrBlank()) {
+            return "Keterangan alasan Lainnya wajib diisi"
+        }
+        return null
+    }
+
+    private suspend fun commitDeliveryStatus(
+        awb: String,
+        status: String,
+        notes: String?,
+        pendingReasonCode: String?,
+        pendingReasonNote: String?,
+        lat: Double?,
+        lng: Double?,
+        photoUrl: String?,
+        courierName: String,
+        courierId: String,
+        locationAddress: String?,
+    ): Result<Unit> = runCatching {
+        val response = apiService.updateDeliveryStatus(
+            DeliveryStatusUpdateRequest(
+                awb = awb.trim().uppercase(),
+                courierId = courierId,
+                courierName = courierName,
+                status = status,
+                reasonCode = pendingReasonCode,
+                reasonNote = pendingReasonNote?.trim()?.ifBlank { null },
+                notes = notes?.trim()?.ifBlank { null },
+                location = locationAddress,
+                latitude = lat,
+                longitude = lng,
+                photoUrl = photoUrl,
+            )
+        )
+        if (!response.isSuccessful) {
+            val error = runCatching { response.errorBody()?.string() }.getOrNull()
+            throw HttpStatusException(response.code(), error ?: "Gagal update status")
+        }
+    }
+
+    private suspend fun syncDeliveredToBranch(
+        awb: String,
+        status: String,
+        photoUrl: String?,
+        courierName: String,
+        armada: String,
+        platArmada: String,
+    ) {
+        val cleanAwb = awb.trim().uppercase()
+        if (status != DeliveryStatus.DELIVERED || !cleanAwb.startsWith("BE")) return
+        if (photoUrl.isNullOrBlank()) {
+            Log.w(tag, "Skip branch scanttd for $cleanAwb: missing photoUrl")
+            return
+        }
+        runCatching {
+            val branchRes = branchApiService.syncScanTtd(
+                BuildConfig.BRANCH_API_KEY,
+                BranchScanTtdRequest(
+                    no_resi = cleanAwb,
+                    nama_kurir = courierName,
+                    armada = armada,
+                    plat_armada = platArmada,
+                    gambar = photoUrl,
+                    pemindai = courierName,
+                )
+            )
+            if (!branchRes.isSuccessful) {
+                val error = runCatching { branchRes.errorBody()?.string() }.getOrNull()
+                Log.w(tag, "Branch scanttd failed for $cleanAwb: ${branchRes.code()} ${error.orEmpty()}".trim())
+            }
+        }.onFailure { error ->
+            Log.w(tag, "Branch scanttd error for $cleanAwb: ${error.message}", error)
+        }
+    }
+
+    private class HttpStatusException(
+        val statusCode: Int,
+        message: String,
+    ) : Exception(message) {
+        val retryable: Boolean = statusCode == 408 || statusCode == 429 || statusCode >= 500
+    }
+}
+
+private fun Map<String, String>?.firstValue(vararg keys: String): String? {
+    if (this == null) return null
+    return keys.firstNotNullOfOrNull { key ->
+        get(key)?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+    }
+}
+
+private fun String.preferRealValue(fallback: String?): String {
+    val current = trim()
+    return if (
+        current.isBlank() ||
+        current.equals("Auto Generated", ignoreCase = true) ||
+        current.equals("N/A", ignoreCase = true)
+    ) {
+        fallback?.takeIf { it.isNotBlank() } ?: this
+    } else {
+        this
+    }
+}
+
+private fun Map<String, String>?.codAmount(): Double {
+    if (this == null) return 0.0
+    val direct = firstValue("ongkos_kirim", "cod_amount", "nominal_cod", "nilai_cod")
+    if (direct != null) return direct.toMoneyDouble()
+
+    val paymentMethod = firstValue("metode_pembayaran", "payment_method")
+    return if (paymentMethod?.contains("cod", ignoreCase = true) == true) {
+        firstValue("total", "grand_total")?.toMoneyDouble() ?: 0.0
+    } else {
+        0.0
+    }
+}
+
+private fun String.toMoneyDouble(): Double {
+    val compact = trim()
+        .replace(Regex("(?i)rp"), "")
+        .replace(" ", "")
+    if (compact.matches(Regex("^\\d{1,3}([.,]\\d{3})+$"))) {
+        return compact.filter(Char::isDigit).toDoubleOrNull() ?: 0.0
+    }
+    compact.toDoubleOrNull()?.let { return it }
+    compact.replace(',', '.').toDoubleOrNull()?.let { return it }
+
+    val digits = compact.filter(Char::isDigit)
+    return digits.toDoubleOrNull() ?: 0.0
 }

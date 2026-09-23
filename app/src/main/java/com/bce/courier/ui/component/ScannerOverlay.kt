@@ -20,7 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 
-enum class ScannerOverlayScanEffect { Classic, GoPay }
+enum class ScannerOverlayScanEffect { Classic, GoPay, None }
 
 @Composable
 fun ScannerOverlay(
@@ -121,11 +121,12 @@ fun ScannerOverlay(
                 .size(width = boxWidth * introAnimation.value, height = boxHeight * introAnimation.value)
                 .clip(RoundedCornerShape(cornerRadiusDp))
         ) {
-            if (introAnimation.value >= 0.9f) {
+            if (introAnimation.value >= 0.9f && scanEffect != ScannerOverlayScanEffect.None) {
                 val infiniteTransition = rememberInfiniteTransition(label = "ScanLine")
                 val scanDurationMs = when (scanEffect) {
                     ScannerOverlayScanEffect.GoPay -> 1300
                     ScannerOverlayScanEffect.Classic -> 1900
+                    ScannerOverlayScanEffect.None -> 1600
                 }
                 val rawYOffset by infiniteTransition.animateFloat(
                     initialValue = 0.06f,
@@ -138,6 +139,8 @@ fun ScannerOverlay(
                 )
 
                 when (scanEffect) {
+                    ScannerOverlayScanEffect.None -> Unit
+
                     ScannerOverlayScanEffect.Classic -> {
                         val currentY = boxHeight * rawYOffset
 

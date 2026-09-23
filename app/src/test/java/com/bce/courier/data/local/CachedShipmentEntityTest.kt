@@ -19,6 +19,9 @@ class CachedShipmentEntityTest {
             created_at = "2026-07-26T01:00:00Z",
             updated_at = "2026-07-26T02:00:00Z",
             courier_id = "courier-a",
+            pending_reason_code = "recipient_unavailable",
+            pending_reason_note = "Rumah kosong",
+            pending_at = "2026-07-26T02:00:00Z",
         )
 
         val cached = CachedShipmentEntity.from("courier-a", source, cachedAt = 123L)

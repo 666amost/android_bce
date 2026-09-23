@@ -95,6 +95,7 @@ Thumbs.db
 
 # Markdown files (as requested, case-insensitive)
 *.[mM][dD]
+!WEB-PENDING-STATUS-INTEGRATION.md
 
 # Environment files
 .env
@@ -129,3 +130,4 @@ obj/
 # APK Signing
 signing.properties
 keystore.properties
+supabase-pending-status-migration.sql

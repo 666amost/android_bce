@@ -25,5 +25,14 @@ data class ShipmentItem(
     val lng: Double? = null,
     val created_at: String = "",
     val updated_at: String? = null,
-    val courier_id: String? = null
+    val courier_id: String? = null,
+    val pending_reason_code: String? = null,
+    val pending_reason_note: String? = null,
+    val pending_at: String? = null,
+)
+
+data class ShipmentLookupResult(
+    val shipment: ShipmentItem?,
+    val isRegisteredShipment: Boolean,
+    val hasManifestData: Boolean,
 )
