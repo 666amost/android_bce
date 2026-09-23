@@ -2,6 +2,7 @@ package com.bce.courier.data.api
 
 import com.bce.courier.data.model.AppConfigResponse
 import com.bce.courier.data.model.DeliveryStatusUpdateRequest
+import com.bce.courier.data.model.ShipmentAssignmentRequest
 import com.bce.courier.data.model.ShipmentItem
 import com.bce.courier.data.model.UserData
 import kotlinx.serialization.json.JsonObject
@@ -24,7 +25,7 @@ interface CourierApiService {
     @PATCH("shipments")
     suspend fun updateShipment(
         @Query("awb_number") awbFilter: String,
-        @Body updates: Map<String, String?>
+        @Body updates: ShipmentAssignmentRequest
     ): Response<Unit>
 
     @POST("shipments")

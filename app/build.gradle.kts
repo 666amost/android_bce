@@ -13,8 +13,8 @@ android {
         applicationId = "com.bce.courier"
         minSdk = 29
         targetSdk = 34
-        versionCode = 18
-        versionName = "v1.0.18"
+        versionCode = 19
+        versionName = "v1.0.19"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

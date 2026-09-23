@@ -13,6 +13,7 @@ import com.bce.courier.data.local.AppDatabase
 import com.bce.courier.data.local.PendingUpdateEntity
 import com.bce.courier.data.local.CachedShipmentEntity
 import com.bce.courier.data.model.AssignmentOutcome
+import com.bce.courier.data.model.ShipmentAssignmentRequest
 import com.bce.courier.data.model.DeliveryStatus
 import com.bce.courier.data.model.DeliveryStatusUpdateRequest
 import com.bce.courier.data.model.DeliveryUpdateOutcome
@@ -290,13 +291,13 @@ class ShipmentRepository(
                         return@withContext AssignmentOutcome.Failed(cleanAwb, "Gagal membuat resi")
                     }
                 } else {
-                    val updates = mapOf<String, String?>(
-                        "current_status" to "out_for_delivery",
-                        "courier_id" to courierId,
-                        "updated_at" to timestamp,
-                        "pending_reason_code" to null,
-                        "pending_reason_note" to null,
-                        "pending_at" to null,
+                    val updates = ShipmentAssignmentRequest(
+                        currentStatus = DeliveryStatus.OUT_FOR_DELIVERY,
+                        courierId = courierId,
+                        updatedAt = timestamp,
+                        pendingReasonCode = null,
+                        pendingReasonNote = null,
+                        pendingAt = null,
                     )
                     val updateRes = apiService.updateShipment("eq.$cleanAwb", updates)
                     if (!updateRes.isSuccessful) {
