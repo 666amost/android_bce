@@ -34,15 +34,38 @@ internal object CourierTrackingConfig {
     const val keepAliveSeconds = 90
     const val nearbyCourierTtlMs = 90_000L
     const val nearbyCourierEmptyWaitMs = 30_000L
-    const val nearbyTopic = "v1/courier/location/+"
+
+    val enabledBrokers: List<CourierMqttBroker>
+        get() = buildList {
+            if (BuildConfig.MQTT_ENABLED) {
+                add(CourierMqttBroker(
+                    id = "hivemq",
+                    host = BuildConfig.MQTT_HOST,
+                    port = BuildConfig.MQTT_PORT,
+                    username = BuildConfig.MQTT_USERNAME,
+                    password = BuildConfig.MQTT_PASSWORD,
+                ))
+            }
+            if (BuildConfig.MQTT_AVISHA_ENABLED) {
+                add(CourierMqttBroker(
+                    id = "avisha",
+                    host = BuildConfig.MQTT_AVISHA_HOST,
+                    port = BuildConfig.MQTT_AVISHA_PORT,
+                    username = BuildConfig.MQTT_AVISHA_USERNAME,
+                    password = BuildConfig.MQTT_AVISHA_PASSWORD,
+                    topicPrefix = BuildConfig.MQTT_AVISHA_TOPIC_PREFIX,
+                ))
+            }
+        }.filter { it.isConfigured }
 
     val isEnabled: Boolean
-        get() = BuildConfig.MQTT_ENABLED &&
-            BuildConfig.MQTT_HOST.isNotBlank() &&
-            BuildConfig.MQTT_USERNAME.isNotBlank() &&
-            BuildConfig.MQTT_PASSWORD.isNotBlank()
+        get() = enabledBrokers.isNotEmpty()
 
-    fun createConnectOptions(context: Context, courierId: String): MqttConnectOptions {
+    fun createConnectOptions(
+        context: Context,
+        courierId: String,
+        broker: CourierMqttBroker,
+    ): MqttConnectOptions {
         val deviceId = context
             .getSharedPreferences("courier_tracking", Context.MODE_PRIVATE)
             .let { prefs ->
@@ -53,19 +76,19 @@ internal object CourierTrackingConfig {
             }
 
         return MqttConnectOptions.Builder()
-            .serverUris(listOf(ServerUri(BuildConfig.MQTT_HOST, BuildConfig.MQTT_PORT)))
-            .clientId(buildClientId(courierId, deviceId))
-            .userName(BuildConfig.MQTT_USERNAME)
-            .password(BuildConfig.MQTT_PASSWORD)
+            .serverUris(listOf(ServerUri(broker.host, broker.port, "ssl")))
+            .clientId(buildClientId(courierId, deviceId, broker.id))
+            .userName(broker.username)
+            .password(broker.password)
             .cleanSession(true)
             .keepAlive(KeepAlive(keepAliveSeconds))
             .build()
     }
 
-    private fun buildClientId(courierId: String, deviceId: String): String {
+    private fun buildClientId(courierId: String, deviceId: String, brokerId: String): String {
         val courierPart = sanitize(courierId, 36)
         val devicePart = sanitize(deviceId, 16)
-        return "bce-$courierPart-$devicePart".take(64)
+        return "bce-${sanitize(brokerId, 8)}-$courierPart-$devicePart".take(64)
     }
 
     private fun sanitize(value: String, maxLength: Int): String {

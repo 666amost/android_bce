@@ -131,3 +131,4 @@ obj/
 signing.properties
 keystore.properties
 supabase-pending-status-migration.sql
+MQTT_BROKER_MIGRATION.txt

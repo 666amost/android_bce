@@ -6,6 +6,25 @@ import org.junit.Test
 
 class NearbyCourierFormatterTest {
     @Test
+    fun duplicateAndDelayedBrokerCopiesDoNotReplaceLatestLocation() {
+        NearbyCourierStore.startSession(now = 0L)
+        val latest = CourierLocationMessage(
+            lat = 0.0, lng = 109.0, bearing = 0f, speed = 0f,
+            accuracy = 5f, timestamp = 2_000L, courierId = "courier-a", courierName = "Amos",
+        )
+        NearbyCourierStore.onLocation(latest, "courier-a", receivedAt = 2_000L)
+        NearbyCourierStore.onLocation(latest, "courier-a", receivedAt = 3_000L)
+        NearbyCourierStore.onLocation(
+            latest.copy(lat = 1.0, timestamp = 1_000L), "courier-a", receivedAt = 4_000L
+        )
+        val locations = NearbyCourierStore.state.value.locations
+        assertEquals(1, locations.size)
+        assertEquals(0.0, locations.getValue("courier-a").lat, 0.0)
+        assertEquals(2_000L, locations.getValue("courier-a").receivedAt)
+        NearbyCourierStore.stopSession()
+    }
+
+    @Test
     fun calculatesAndFormatsNearbyDistance() {
         val distance = NearbyCourierFormatter.distanceMeters(
             fromLat = 0.0,

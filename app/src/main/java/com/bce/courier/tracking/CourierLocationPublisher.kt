@@ -8,9 +8,9 @@ import com.gojek.courier.annotation.Send
 import com.gojek.courier.callback.SendMessageCallback
 
 internal interface CourierLocationPublisher {
-    @Send(topic = "v1/courier/location/{courierId}", qos = QoS.ZERO)
+    @Send(topic = "{locationTopic}", qos = QoS.ZERO)
     fun sendLocation(
-        @Path("courierId") courierId: String,
+        @Path("locationTopic") locationTopic: String,
         @Data location: CourierLocationMessage,
         @Callback callback: SendMessageCallback
     )

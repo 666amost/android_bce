@@ -215,10 +215,8 @@ class CourierTrackingService : Service() {
             startLocationUpdates()
         }
 
-        val state = trackingClient?.currentState()
-        if (state != ConnectionState.CONNECTED && state != ConnectionState.CONNECTING) {
-            trackingClient?.reconnectIfNeeded(activeCourierId)
-        }
+        // Recover each broker even while the other broker remains connected.
+        trackingClient?.reconnectIfNeeded(activeCourierId)
 
         val now = System.currentTimeMillis()
         if (lastPublishedAt == 0L || now - lastPublishedAt >= CourierTrackingConfig.connectionMonitorWarmLocationIntervalMs) {

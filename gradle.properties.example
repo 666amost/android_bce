@@ -14,8 +14,22 @@ SUPABASE_URL=
 SUPABASE_ANON_KEY=
 BRANCH_SYNC_URL=
 BRANCH_API_KEY=
+# HiveMQ lama (opsional). Selama transisi, aktifkan bersama Avisha.
+# Setelah HiveMQ shutdown: MQTT_ENABLED=false, atau hapus blok HiveMQ ini.
+# MQTT_ENABLED hanya mengontrol koneksi HiveMQ, bukan Avisha.
 MQTT_HOST=
 MQTT_PORT=8883
 MQTT_USERNAME=
 MQTT_PASSWORD=
 MQTT_ENABLED=false
+
+# Broker baru Avisha. Isi password di gradle.properties lokal, jangan di file example.
+# Aktifkan kedua broker untuk tes paralel; aktifkan hanya Avisha setelah migrasi.
+# Topik publish: kurir_bce/v1/courier/location/<courierId>
+# Topik subscribe: kurir_bce/v1/courier/location/+
+MQTT_AVISHA_ENABLED=false
+MQTT_AVISHA_HOST=broker.avisha.id
+MQTT_AVISHA_PORT=8883
+MQTT_AVISHA_USERNAME=kurir_bce
+MQTT_AVISHA_PASSWORD=
+MQTT_AVISHA_TOPIC_PREFIX=kurir_bce

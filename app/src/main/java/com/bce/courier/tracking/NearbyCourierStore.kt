@@ -66,6 +66,9 @@ object NearbyCourierStore {
         if (!location.lat.isFinite() || !location.lng.isFinite()) return
         if (location.lat !in -90.0..90.0 || location.lng !in -180.0..180.0) return
         if (location.accuracy > CourierTrackingConfig.maxAcceptedAccuracyMeters) return
+        // Both brokers carry the same samples; delayed copies must not move a courier back.
+        val previous = mutableState.value.locations[resolvedCourierId]
+        if (previous != null && location.timestamp <= previous.timestamp) return
 
         val fallbackName = "Kurir ${resolvedCourierId.takeLast(4).uppercase()}"
         val previousName = mutableState.value.locations[resolvedCourierId]

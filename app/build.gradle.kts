@@ -24,6 +24,7 @@ android {
         fun gradleStringProperty(name: String, defaultValue: String = ""): String =
             ((project.findProperty(name) as String?) ?: defaultValue)
                 .trim()
+                .replace("\\", "\\\\")
                 .replace("\"", "\\\"")
 
         val supportWaNumber = gradleStringProperty("SUPPORT_WA_NUMBER")
@@ -53,6 +54,20 @@ android {
         buildConfigField("int", "MQTT_PORT", mqttPort.toString())
         buildConfigField("String", "MQTT_USERNAME", "\"$mqttUsername\"")
         buildConfigField("String", "MQTT_PASSWORD", "\"$mqttPassword\"")
+
+        // Independent from MQTT_ENABLED so HiveMQ can be removed after migration.
+        val avishaEnabled = gradleStringProperty("MQTT_AVISHA_ENABLED", "false").toBoolean()
+        val avishaHost = gradleStringProperty("MQTT_AVISHA_HOST", "broker.avisha.id")
+        val avishaPort = gradleStringProperty("MQTT_AVISHA_PORT", "8883").toIntOrNull() ?: 8883
+        val avishaUsername = gradleStringProperty("MQTT_AVISHA_USERNAME", "kurir_bce")
+        val avishaPassword = gradleStringProperty("MQTT_AVISHA_PASSWORD")
+        val avishaTopicPrefix = gradleStringProperty("MQTT_AVISHA_TOPIC_PREFIX", "kurir_bce")
+        buildConfigField("boolean", "MQTT_AVISHA_ENABLED", avishaEnabled.toString())
+        buildConfigField("String", "MQTT_AVISHA_HOST", "\"$avishaHost\"")
+        buildConfigField("int", "MQTT_AVISHA_PORT", avishaPort.toString())
+        buildConfigField("String", "MQTT_AVISHA_USERNAME", "\"$avishaUsername\"")
+        buildConfigField("String", "MQTT_AVISHA_PASSWORD", "\"$avishaPassword\"")
+        buildConfigField("String", "MQTT_AVISHA_TOPIC_PREFIX", "\"$avishaTopicPrefix\"")
     }
 
     buildTypes {
