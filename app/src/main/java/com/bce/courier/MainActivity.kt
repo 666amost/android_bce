@@ -13,17 +13,23 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -36,8 +42,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -52,14 +56,24 @@ import com.bce.courier.data.manager.SessionManager
 import com.bce.courier.data.model.*
 import com.bce.courier.tracking.CourierTrackingService
 import com.bce.courier.tracking.CourierTrackingStatus
-import com.bce.courier.ui.component.BulkUpdateDialog
+import com.bce.courier.ui.component.BulkUpdateContent
 import com.bce.courier.ui.component.ScannerView
-import com.bce.courier.ui.component.ContinuousScannerDialog
+import com.bce.courier.ui.component.ContinuousScannerContent
 import com.bce.courier.ui.component.ScannedItem
 import com.bce.courier.ui.component.ScannerOverlay
-import com.bce.courier.ui.component.ScannerOverlayScanEffect
+import com.bce.courier.ui.component.CourierMotionLayout
+import com.bce.courier.ui.component.CourierMotionState
+import com.bce.courier.ui.component.CourierMotionOrigin
+import com.bce.courier.ui.component.CourierMotionPanel
+import com.bce.courier.ui.component.CourierPanel
+import com.bce.courier.ui.component.ScannerToolbar
+import com.bce.courier.ui.component.ScanModePicker
 import com.bce.courier.ui.component.ShipmentScanDetailDialog
 import com.bce.courier.ui.component.ForceUpdateDialog
+import com.bce.courier.ui.component.AppVersionDialog
+import com.bce.courier.ui.component.CourierSupportDialog
+import com.bce.courier.ui.component.NearbyCouriersDialog
+import com.bce.courier.ui.screen.CourierAccountScreen
 import com.bce.courier.ui.screen.DashboardScreen
 import com.bce.courier.ui.screen.LoginScreen
 import com.bce.courier.ui.screen.MapPreviewScreen
@@ -351,6 +365,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         val appContext = applicationContext
 
         // Initialize Network and Session
@@ -373,6 +388,29 @@ class MainActivity : ComponentActivity() {
                 var isLoginLoading by remember { mutableStateOf(false) }
                 var loginErrorMessage by remember { mutableStateOf<String?>(null) }
                 var trackingStatus by remember { mutableStateOf(CourierTrackingStatus.OFF) }
+
+                DisposableEffect(Unit) {
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: Context?, intent: Intent?) {
+                            trackingStatus = CourierTrackingStatus.fromValue(
+                                intent?.getStringExtra(CourierTrackingService.EXTRA_TRACKING_STATUS)
+                            )
+                        }
+                    }
+                    val filter = IntentFilter(CourierTrackingService.ACTION_TRACKING_STATUS)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+                    } else {
+                        @Suppress("UnspecifiedRegisterReceiverFlag")
+                        registerReceiver(receiver, filter)
+                    }
+                    onDispose {
+                        unregisterReceiver(receiver)
+                    }
+                }
+
 
                 LaunchedEffect(isLoggedIn) {
                     if (!isLoggedIn) {
@@ -471,6 +509,11 @@ class MainActivity : ComponentActivity() {
                 // New Features State
                 var showBulkDialog by remember { mutableStateOf(false) }
                 var scanMode by remember { mutableStateOf(ScanMode.NONE) }
+                var showScanModePicker by remember { mutableStateOf(false) }
+                var showProfilePanel by remember { mutableStateOf(false) }
+                val courierMotion = remember { CourierMotionState() }
+                var scannerContentMode by remember { mutableStateOf(ScanMode.NONE) }
+                if (scanMode != ScanMode.NONE) scannerContentMode = scanMode
                 var scannedItems by remember { mutableStateOf<List<ScannedItem>>(emptyList()) }
                 var lastScanStatus by remember { mutableStateOf("none") }
                 var isBulkProcessing by remember { mutableStateOf(false) }
@@ -487,6 +530,23 @@ class MainActivity : ComponentActivity() {
                 val successfulAwbs = remember { ContinuousScanSession() }
 
                 // Update Checker State
+                var showVersionDialog by rememberSaveable { mutableStateOf(false) }
+                var showSupportDialog by rememberSaveable { mutableStateOf(false) }
+                var showNearbyCouriers by rememberSaveable { mutableStateOf(false) }
+                LaunchedEffect(isLoggedIn) {
+                    if (!isLoggedIn) {
+                        showVersionDialog = false
+                        showSupportDialog = false
+                        showNearbyCouriers = false
+                        showProfilePanel = false
+                        showScanModePicker = false
+                        showBulkDialog = false
+                        scanMode = ScanMode.NONE
+                    }
+                }
+                var hasCheckedForUpdate by remember { mutableStateOf(false) }
+                var isCheckingForUpdate by remember { mutableStateOf(false) }
+                var updateCheckError by remember { mutableStateOf<String?>(null) }
                 var updateAvailable by remember { mutableStateOf(false) }
                 var latestVersionName by remember { mutableStateOf("") }
                 var updateChangelog by remember { mutableStateOf("") }
@@ -514,16 +574,29 @@ class MainActivity : ComponentActivity() {
 
                     val currentCode = BuildConfig.VERSION_CODE
                     val latestCode = versioning.latest_version_code
+                    hasCheckedForUpdate = latestCode != null
+                    updateCheckError = if (latestCode == null) "Informasi pembaruan belum tersedia. Coba lagi nanti." else null
                     val latestIsNewer = latestCode != null && latestCode > currentCode
 
-                    val updateInfo = updateHelper.checkForUpdate(versioning)
+                    val updateInfo = updateHelper.checkForUpdate(versioning)?.takeIf {
+                        it.latestVersionName.isNotBlank() && it.apkUrl.isNotBlank()
+                    }
+                    if (latestIsNewer && updateInfo == null) {
+                        hasCheckedForUpdate = false
+                        updateCheckError = "Pembaruan tersedia, tetapi detail unduhan belum lengkap. Hubungi tim operasional."
+                    }
                     if (updateInfo != null) {
+                        if (updateApkUrl != updateInfo.apkUrl || latestVersionName != updateInfo.latestVersionName) {
+                            isUpdateDownloaded = false
+                            updateDownloadError = null
+                        }
                         updateAvailable = updateInfo.isAvailable
                         latestVersionName = updateInfo.latestVersionName
                         updateChangelog = updateInfo.changelog
                         updateApkUrl = updateInfo.apkUrl
                     } else {
                         updateAvailable = false
+                        isUpdateDownloaded = false
                         latestVersionName = ""
                         updateChangelog = ""
                         updateApkUrl = ""
@@ -922,13 +995,18 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                CourierMotionLayout(courierMotion) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     NavHost(
                         navController = navController,
-                        startDestination = if (sessionManager.isLoggedIn()) "dashboard" else "login"
+                        startDestination = if (sessionManager.isLoggedIn()) "dashboard" else "login",
+                        enterTransition = { fadeIn(tween(180)) + slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { it / 12 } },
+                        exitTransition = { fadeOut(tween(140)) + slideOutHorizontally(tween(240, easing = FastOutSlowInEasing)) { -it / 24 } },
+                        popEnterTransition = { fadeIn(tween(180)) + slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { -it / 24 } },
+                        popExitTransition = { fadeOut(tween(140)) + slideOutHorizontally(tween(240, easing = FastOutSlowInEasing)) { it / 12 } },
                     ) {
 
                         composable("login") {
@@ -989,30 +1067,8 @@ class MainActivity : ComponentActivity() {
                                 initialRemember = rememberChecked
                             )
                         }
-                        
-                        composable("dashboard") {
 
-                            DisposableEffect(Unit) {
-                                val receiver = object : BroadcastReceiver() {
-                                    override fun onReceive(context: Context?, intent: Intent?) {
-                                        trackingStatus = CourierTrackingStatus.fromValue(
-                                            intent?.getStringExtra(CourierTrackingService.EXTRA_TRACKING_STATUS)
-                                        )
-                                    }
-                                }
-                                val filter = IntentFilter(CourierTrackingService.ACTION_TRACKING_STATUS)
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
-                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                    registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
-                                } else {
-                                    @Suppress("UnspecifiedRegisterReceiverFlag")
-                                    registerReceiver(receiver, filter)
-                                }
-                                onDispose {
-                                    unregisterReceiver(receiver)
-                                }
-                            }
+                        composable("dashboard") {
 
                             DisposableEffect(Unit) {
                                 val receiver = object : BroadcastReceiver() {
@@ -1041,8 +1097,8 @@ class MainActivity : ComponentActivity() {
                                 completedCount = completedCount,
                                 pendingCount = pendingCount,
                                 pendingSyncCount = pendingSyncCount,
-                                trackingStatus = trackingStatus,
                                 pointsScore = pointsScore,
+                                trackingStatus = trackingStatus,
                                 overdue14dCount = overdue14dCount,
                                 showOverdueDialog = showOverdueDialog,
                                 isLoading = isDashboardLoading,
@@ -1050,21 +1106,9 @@ class MainActivity : ComponentActivity() {
                                 cachedDataUpdatedAt = dashboardCacheUpdatedAt,
                                 selectedTab = selectedTab,
                                 updateAvailable = updateAvailable,
-                                latestVersionName = latestVersionName,
-                                changelog = updateChangelog,
-                                isDownloading = isDownloadingUpdate,
-                                downloadProgressPercent = updateDownloadProgressPercent,
-                                isUpdateDownloaded = isUpdateDownloaded,
-                                updateDownloadError = updateDownloadError,
                                 onTabSelected = { selectedTab = it },
                                 onRefresh = { fetchShipments() },
-                                onLogout = {
-                                    sessionManager.clearSession()
-                                    isLoggedIn = false
-                                    navController.navigate("login") {
-                                        popUpTo("dashboard") { inclusive = true }
-                                    }
-                                },
+                                onProfileClick = { courierMotion.open(CourierMotionOrigin.Profile); showProfilePanel = true },
                                 onShipmentClick = { shipmentItem ->
                                     val normalized = normalizeAwb(shipmentItem.awb) ?: shipmentItem.awb
                                     navController.navigate("update_shipment/$normalized")
@@ -1073,38 +1117,18 @@ class MainActivity : ComponentActivity() {
                                     val normalized = normalizeAwb(shipmentItem.awb) ?: shipmentItem.awb
                                     navController.navigate("map_preview/$normalized")
                                 },
-                                onSearchScanClick = { 
-                                    scanMode = ScanMode.SEARCH 
+                                onSearchScanClick = {
+                                    courierMotion.open(CourierMotionOrigin.Search)
+                                    scanMode = ScanMode.SEARCH
                                 },
-                                onDeliveryScanClick = {
-                                    scanMode = ScanMode.DELIVERY
-                                },
-                                onContinuousScanClick = { 
-                                    scannedItems = emptyList()
-                                    successfulAwbs.clear()
-                                    scanMode = ScanMode.CONTINUOUS 
-                                },
-                                onUpdateClick = { showBulkDialog = true },
+                                onScanMenuClick = { courierMotion.open(CourierMotionOrigin.Scan); showScanModePicker = true },
+                                onUpdateClick = { courierMotion.open(CourierMotionOrigin.Update); showBulkDialog = true },
                                 onPickupClick = { navController.navigate("pickup") },
-                                 onClearStorage = {
-                                     val result = StorageCleaner.clearAppStorage(appContext)
-                                     Toast.makeText(
-                                         appContext,
-                                         "Cache dibersihkan: ${result.deletedFiles} file (${formatStorageSize(result.deletedBytes)})",
-                                         Toast.LENGTH_SHORT
-                                     ).show()
-                                 },
                                 onDismissOverdueDialog = {
-                                     val todayKey = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = utcTz }.format(Date())
-                                     sessionManager.setOverduePopupDismissed(todayKey, overdue14dCount)
-                                     showOverdueDialog = false
-                                 },
-                                onDownloadUpdate = {
-                                    startDownloadUpdate()
+                                    val todayKey = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = utcTz }.format(Date())
+                                    sessionManager.setOverduePopupDismissed(todayKey, overdue14dCount)
+                                    showOverdueDialog = false
                                 },
-                                onInstallUpdate = {
-                                    startInstallUpdate()
-                                }
                             )
 
                             scannedDetailAwb?.let { detailAwb ->
@@ -1163,398 +1187,7 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            if (showBulkDialog) {
-                                BulkUpdateDialog(
-                                    onDismiss = { showBulkDialog = false },
-                                    onUpdate = { awbs ->
-                                        lifecycleScope.launch {
-                                            isBulkProcessing = true
-                                            val userId = sessionManager.getUserId()
-                                            if (userId == null) {
-                                                bulkProcessingStatus = "Sesi berakhir, silakan login ulang"
-                                                playSound(R.raw.scan_error)
-                                                isBulkProcessing = false
-                                                return@launch
-                                            }
-                                            val courierName = sessionManager.getBestCourierName()
-                                            var successCount = 0
-                                            try {
-                                                awbs.forEachIndexed { index, awb ->
-                                                    bulkProcessingStatus = "Updating $awb (${index + 1}/${awbs.size})..."
-                                                    val result = NetworkModule.shipmentRepository.assignShipmentToCourier(awb, userId, courierName)
-                                                    if (
-                                                        result is AssignmentOutcome.NewAssignment ||
-                                                        result is AssignmentOutcome.Transferred ||
-                                                        result is AssignmentOutcome.AlreadyMine
-                                                    ) {
-                                                        successCount++
-                                                    }
-                                                    delay(50)
-                                                }
-                                                bulkProcessingStatus = "Berhasil memperbarui $successCount resi"
-                                                playSound(R.raw.scan_success)
-                                                delay(1000)
-                                                showBulkDialog = false
-                                                bulkAwbText = ""
-                                                loadShipments(false)
-                                            } catch (e: Exception) {
-                                                bulkProcessingStatus = "Error: ${e.message}"
-                                                playSound(R.raw.scan_error)
-                                            } finally {
-                                                isBulkProcessing = false
-                                                bulkProcessingStatus = ""
-                                            }
-                                        }
-                                    },
-                                    isProcessing = isBulkProcessing,
-                                    processingStatus = bulkProcessingStatus,
-                                    onScanClick = {
-                                        showBulkDialog = false
-                                        scanMode = ScanMode.BULK_UPDATE
-                                    },
-                                    awbText = bulkAwbText,
-                                    onAwbTextChange = { bulkAwbText = it }
-                                )
-                            }
 
-                            if (scanMode == ScanMode.SEARCH || scanMode == ScanMode.DELIVERY) {
-                                val isDeliveryScan = scanMode == ScanMode.DELIVERY
-                                var searchScanStatus by remember(scanMode) { mutableStateOf("none") }
-                                val searchBorderColor by animateColorAsState(
-                                    targetValue = when (searchScanStatus) {
-                                        "success" -> Color(0xFF4CAF50)
-                                        "error" -> Color(0xFFF44336)
-                                        else -> Color.White.copy(alpha = 0.5f)
-                                    },
-                                    label = "SearchBorderColor"
-                                )
-
-                                var isFlashOn by remember { mutableStateOf(false) }
-
-                                Dialog(
-                                    onDismissRequest = {
-                                        if (!isSearchScanProcessing) scanMode = ScanMode.NONE
-                                    },
-                                    properties = DialogProperties(usePlatformDefaultWidth = false)
-                                ) {
-                                    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                                        Box(modifier = Modifier.fillMaxSize()) {
-                                            ScannerView(
-                                                isFlashOn = isFlashOn,
-                                                onBarcodeDetected = { rawAwb ->
-                                                    if (isSearchScanProcessing) return@ScannerView
-
-                                                    val awb = normalizeAwb(rawAwb)
-                                                    if (awb == null) {
-                                                        searchScanStatus = "error"
-                                                        playSound(R.raw.scan_error)
-                                                        Toast.makeText(appContext, "Format AWB tidak valid (harus BE/BCE)", Toast.LENGTH_SHORT).show()
-                                                        return@ScannerView
-                                                    }
-
-                                                    if (isDeliveryScan) {
-                                                        searchScanStatus = "success"
-                                                        playSound(R.raw.scan_success)
-                                                        scanMode = ScanMode.NONE
-                                                        navController.navigate("update_shipment/$awb")
-                                                        return@ScannerView
-                                                    }
-
-                                                    isSearchScanProcessing = true
-                                                    lifecycleScope.launch {
-                                                        try {
-                                                            searchScanStatus = "loading"
-
-                                                            val userId = sessionManager.getUserId()
-                                                            if (userId.isNullOrBlank()) {
-                                                                searchScanStatus = "error"
-                                                                playSound(R.raw.scan_error)
-                                                                Toast.makeText(appContext, "Sesi berakhir, silakan login ulang", Toast.LENGTH_SHORT).show()
-                                                                return@launch
-                                                            }
-
-                                                            val lookup = NetworkModule.shipmentRepository.lookupShipmentDetailsByAwb(awb)
-                                                            if (lookup.isFailure) {
-                                                                throw lookup.exceptionOrNull() ?: IllegalStateException("Gagal mencari AWB")
-                                                            }
-                                                            val lookupResult = lookup.getOrThrow()
-                                                            val foundShipment = lookupResult.shipment
-                                                            val ownerId = foundShipment?.courier_id
-                                                            val ownerName = when {
-                                                                ownerId.isNullOrBlank() -> null
-                                                                ownerId == userId -> sessionManager.getBestCourierName()
-                                                                else -> fetchUserNameFromUsersTable(ownerId)
-                                                            }
-
-                                                            scannedDetailAwb = awb
-                                                            scannedDetailShipment = foundShipment
-                                                            scannedDetailIsRegistered = lookupResult.isRegisteredShipment
-                                                            scannedDetailOwnerName = ownerName
-                                                            searchScanStatus = "success"
-                                                            playSound(R.raw.scan_success)
-                                                            scanMode = ScanMode.NONE
-                                                        } catch (e: Exception) {
-                                                            searchScanStatus = "error"
-                                                            playSound(R.raw.scan_error)
-                                                            Log.e("MainActivity", "Error in search scan", e)
-                                                            Toast.makeText(appContext, "Terjadi kesalahan: ${e.message}", Toast.LENGTH_LONG).show()
-                                                        } finally {
-                                                            isSearchScanProcessing = false
-                                                        }
-                                                    }
-                                                }
-                                            )
-
-                                            ScannerOverlay(
-                                                borderColor = searchBorderColor,
-                                                scanEffect = ScannerOverlayScanEffect.None
-                                            )
-                                            
-                                            // Header
-                                            Box(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                                                Row(
-                                                    modifier = Modifier.align(Alignment.TopEnd),
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                ) {
-                                                    IconButton(
-                                                        onClick = { isFlashOn = !isFlashOn },
-                                                        modifier = Modifier
-                                                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-                                                    ) {
-                                                        Icon(
-                                                            if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                                                            contentDescription = "Toggle Flash",
-                                                            tint = if (isFlashOn) Color.Yellow else Color.White
-                                                        )
-                                                    }
-                                                    
-                                                    IconButton(
-                                                        onClick = { scanMode = ScanMode.NONE },
-                                                        modifier = Modifier
-                                                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-                                                    ) {
-                                                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                                                    }
-                                                }
-                                                
-                                                Column(modifier = Modifier.align(Alignment.TopStart)) {
-                                                    Text(
-                                                        if (isDeliveryScan) "Scan Delivery" else "Cari Detail AWB",
-                                                        color = Color.White,
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 20.sp,
-                                                    )
-                                                    Text(
-                                                        if (isDeliveryScan) "Scan resi untuk langsung update status" else "Scan untuk melihat detail dan pemilik",
-                                                        color = Color.White.copy(alpha = 0.7f),
-                                                        fontSize = 12.sp,
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (scanMode == ScanMode.BULK_UPDATE) {
-                                var bulkUpdateScanStatus by remember { mutableStateOf("none") }
-                                val bulkUpdateBorderColor by animateColorAsState(
-                                    targetValue = when (bulkUpdateScanStatus) {
-                                        "success" -> Color(0xFF4CAF50)
-                                        "error" -> Color(0xFFF44336)
-                                        else -> Color.White.copy(alpha = 0.5f)
-                                    },
-                                    label = "BulkUpdateBorderColor"
-                                )
-                                var isFlashOn by remember { mutableStateOf(false) }
-
-                                Dialog(
-                                    onDismissRequest = {
-                                        scanMode = ScanMode.NONE
-                                        showBulkDialog = true
-                                    },
-                                    properties = DialogProperties(usePlatformDefaultWidth = false)
-                                ) {
-                                    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                                        Box(modifier = Modifier.fillMaxSize()) {
-                                            ScannerView(
-                                                isFlashOn = isFlashOn,
-                                                onBarcodeDetected = { rawAwb ->
-                                                    val awb = normalizeAwb(rawAwb)
-                                                    if (awb == null) {
-                                                        bulkUpdateScanStatus = "error"
-                                                        playSound(R.raw.scan_error)
-                                                        return@ScannerView
-                                                    }
-
-                                                    bulkUpdateScanStatus = "success"
-                                                    playSound(R.raw.scan_success)
-
-                                                    val currentAwbs = bulkAwbText.split(Regex("[,\\s\\n]+")).filter { it.isNotBlank() }
-                                                    if (!currentAwbs.contains(awb)) {
-                                                        bulkAwbText = if (bulkAwbText.isBlank()) {
-                                                            awb
-                                                        } else {
-                                                            bulkAwbText + "\n" + awb
-                                                        }
-                                                    }
-
-                                                    lifecycleScope.launch {
-                                                        delay(300)
-                                                        bulkUpdateScanStatus = "none"
-                                                    }
-                                                }
-                                            )
-
-                                            ScannerOverlay(
-                                                borderColor = bulkUpdateBorderColor,
-                                                scanEffect = ScannerOverlayScanEffect.GoPay
-                                            )
-
-                                            Box(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                                                Row(
-                                                    modifier = Modifier.align(Alignment.TopEnd),
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                ) {
-                                                    IconButton(
-                                                        onClick = { isFlashOn = !isFlashOn },
-                                                        modifier = Modifier
-                                                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-                                                    ) {
-                                                        Icon(
-                                                            if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                                                            contentDescription = "Toggle Flash",
-                                                            tint = if (isFlashOn) Color.Yellow else Color.White
-                                                        )
-                                                    }
-                                                    IconButton(
-                                                        onClick = {
-                                                            scanMode = ScanMode.NONE
-                                                            showBulkDialog = true
-                                                        },
-                                                        modifier = Modifier
-                                                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-                                                    ) {
-                                                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                                                    }
-                                                }
-                                                Column(modifier = Modifier.align(Alignment.TopStart)) {
-                                                    Text("Scan QR - Bulk Update", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                                    Text("Scan resi untuk mengisi field", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (scanMode == ScanMode.CONTINUOUS) {
-                                ContinuousScannerDialog(
-                                    onDismiss = { 
-                                        scanMode = ScanMode.NONE
-                                        lastScanStatus = "none"
-                                        lifecycleScope.launch { loadShipments(false) }
-                                    },
-                                    onBarcodeDetected = { rawAwb ->
-                                        val awb = normalizeAwb(rawAwb)
-                                        if (awb == null) {
-                                            lastScanStatus = "error"
-                                            playSound(R.raw.scan_error)
-                                            return@ContinuousScannerDialog
-                                        }
-
-                                        // Skip if currently processing this AWB
-                                        if (processingAwbs.contains(awb)) return@ContinuousScannerDialog
-
-                                        // Reset status flash
-                                        lastScanStatus = "none"
-                                        
-                                        if (successfulAwbs.contains(awb)) {
-                                            lastScanStatus = "duplicate"
-                                            playSound(R.raw.scan_error)
-                                            val item = ScannedItem(
-                                                awb = awb,
-                                                status = "duplicate",
-                                                message = "Sudah discan di sesi ini"
-                                            )
-                                            scannedItems = listOf(item) + scannedItems.filter { it.awb != awb }
-                                            return@ContinuousScannerDialog
-                                        }
-
-                                        processingAwbs.add(awb)
-                                        lifecycleScope.launch {
-                                            try {
-                                                val userId = sessionManager.getUserId()
-                                                if (userId.isNullOrBlank()) {
-                                                    lastScanStatus = "error"
-                                                    playSound(R.raw.scan_error)
-                                                    scannedItems = listOf(
-                                                        ScannedItem(awb, "error", "Sesi berakhir, silakan login ulang")
-                                                    ) + scannedItems.filter { it.awb != awb }
-                                                    return@launch
-                                                }
-
-                                                val courierName = sessionManager.getBestCourierName()
-                                                when (
-                                                    val result = NetworkModule.shipmentRepository.assignShipmentToCourier(
-                                                        awb,
-                                                        userId,
-                                                        courierName
-                                                    )
-                                                ) {
-                                                    is AssignmentOutcome.NewAssignment -> {
-                                                        successfulAwbs.markSuccessful(awb)
-                                                        lastScanStatus = "success"
-                                                        playSound(R.raw.scan_success)
-                                                        scannedItems = listOf(
-                                                            ScannedItem(awb, "success", "Berhasil masuk")
-                                                        ) + scannedItems.filter { it.awb != awb }
-                                                    }
-                                                    is AssignmentOutcome.Transferred -> {
-                                                        successfulAwbs.markSuccessful(awb)
-                                                        lastScanStatus = "transferred"
-                                                        playSound(R.raw.scan_success)
-                                                        scannedItems = listOf(
-                                                            ScannedItem(awb, "transferred", "Dialihkan ke Anda")
-                                                        ) + scannedItems.filter { it.awb != awb }
-                                                    }
-                                                    is AssignmentOutcome.AlreadyMine -> {
-                                                        successfulAwbs.markSuccessful(awb)
-                                                        lastScanStatus = "duplicate"
-                                                        playSound(R.raw.scan_error)
-                                                        scannedItems = listOf(
-                                                            ScannedItem(awb, "duplicate", "Sudah berada pada Anda")
-                                                        ) + scannedItems.filter { it.awb != awb }
-                                                    }
-                                                    is AssignmentOutcome.Delivered -> {
-                                                        lastScanStatus = "error"
-                                                        playSound(R.raw.scan_error)
-                                                        scannedItems = listOf(
-                                                            ScannedItem(awb, "error", "AWB sudah delivered")
-                                                        ) + scannedItems.filter { it.awb != awb }
-                                                    }
-                                                    is AssignmentOutcome.Failed -> {
-                                                        lastScanStatus = "error"
-                                                        playSound(R.raw.scan_error)
-                                                        scannedItems = listOf(
-                                                            ScannedItem(awb, "error", result.message)
-                                                        ) + scannedItems.filter { it.awb != awb }
-                                                    }
-                                                }
-                                            } finally {
-                                                processingAwbs.remove(awb)
-                                            }
-
-                                            delay(1000)
-                                            if (lastScanStatus != "none") {
-                                                lastScanStatus = "none"
-                                            }
-                                        }
-                                    },
-                                    scannedItems = scannedItems,
-                                    lastScanStatus = lastScanStatus
-                                )
-                            }
                         }
 
                         composable("update_shipment/{awb}") { backStackEntry ->
@@ -2062,6 +1695,434 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    if (isLoggedIn && !forceUpdateRequired && (showProfilePanel || showBulkDialog || showScanModePicker || scanMode != ScanMode.NONE)) {
+                        CourierMotionPanel(
+                            panel = when {
+                                showProfilePanel -> CourierPanel.Profile
+                                scanMode != ScanMode.NONE -> CourierPanel.Scanner
+                                showBulkDialog -> CourierPanel.Update
+                                else -> CourierPanel.ScanMenu
+                            },
+                            dismissEnabled = !isBulkProcessing && !isSearchScanProcessing,
+                            onBack = if (scanMode == ScanMode.BULK_UPDATE) ({ scanMode = ScanMode.NONE }) else null,
+                            onDismiss = {
+                                val finishedMode = scanMode
+                                showProfilePanel = false
+                                showBulkDialog = false
+                                showScanModePicker = false
+                                scanMode = ScanMode.NONE
+                                lastScanStatus = "none"
+                                if (finishedMode == ScanMode.CONTINUOUS) lifecycleScope.launch { loadShipments(false) }
+                            },
+                            compactContent = { closePanel ->
+                                if (showBulkDialog) {
+                                    BulkUpdateContent(
+                                        onDismiss = { closePanel {} },
+                                        onUpdate = { awbs ->
+                                            lifecycleScope.launch {
+                                                isBulkProcessing = true
+                                                val userId = sessionManager.getUserId()
+                                                if (userId == null) {
+                                                    bulkProcessingStatus = "Sesi berakhir, silakan login ulang"
+                                                    playSound(R.raw.scan_error)
+                                                    isBulkProcessing = false
+                                                    return@launch
+                                                }
+                                                val courierName = sessionManager.getBestCourierName()
+                                                var successCount = 0
+                                                try {
+                                                    awbs.forEachIndexed { index, awb ->
+                                                        bulkProcessingStatus = "Updating $awb (${index + 1}/${awbs.size})..."
+                                                        val result = NetworkModule.shipmentRepository.assignShipmentToCourier(awb, userId, courierName)
+                                                        if (
+                                                            result is AssignmentOutcome.NewAssignment ||
+                                                            result is AssignmentOutcome.Transferred ||
+                                                            result is AssignmentOutcome.AlreadyMine
+                                                        ) {
+                                                            successCount++
+                                                        }
+                                                        delay(50)
+                                                    }
+                                                    bulkProcessingStatus = "Berhasil memperbarui $successCount resi"
+                                                    playSound(R.raw.scan_success)
+                                                    delay(1000)
+                                                    closePanel { bulkAwbText = "" }
+                                                    loadShipments(false)
+                                                } catch (e: Exception) {
+                                                    bulkProcessingStatus = "Error: ${e.message}"
+                                                    playSound(R.raw.scan_error)
+                                                } finally {
+                                                    isBulkProcessing = false
+                                                    bulkProcessingStatus = ""
+                                                }
+                                            }
+                                        },
+                                        isProcessing = isBulkProcessing,
+                                        processingStatus = bulkProcessingStatus,
+                                        onScanClick = {
+                                            scanMode = ScanMode.BULK_UPDATE
+                                        },
+                                        awbText = bulkAwbText,
+                                        onAwbTextChange = { bulkAwbText = it }
+                                    )
+                                } else {
+                                    ScanModePicker(
+                                        onIncoming = {
+                                            scannedItems = emptyList()
+                                            successfulAwbs.clear()
+                                            scanMode = ScanMode.CONTINUOUS
+                                        },
+                                        onDelivery = { scanMode = ScanMode.DELIVERY },
+                                        onDismiss = { closePanel {} },
+                                    )
+                                }
+                            },
+                        ) { scanReady, closePanel ->
+                            if (showProfilePanel) {
+                                CourierAccountScreen(
+                                    userName = sessionManager.getBestCourierName(),
+                                    userEmail = sessionManager.getUserEmail().orEmpty(),
+                                    trackingStatus = trackingStatus,
+                                    pendingSyncCount = pendingSyncCount,
+                                    updateAvailable = updateAvailable,
+                                    isDownloadingUpdate = isDownloadingUpdate,
+                                    onBack = { closePanel {} },
+                                    onNearbyCouriersClick = { showNearbyCouriers = true },
+                                    onAppSettingsClick = {
+                                        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                                    },
+                                    onClearCache = {
+                                        val result = StorageCleaner.clearAppStorage(appContext)
+                                        isUpdateDownloaded = false
+                                        Toast.makeText(
+                                            appContext,
+                                            "Cache dibersihkan: ${result.deletedFiles} file (${formatStorageSize(result.deletedBytes)})",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    },
+                                    onSupportClick = { showSupportDialog = true },
+                                    onVersionClick = { showVersionDialog = true },
+                                    onLogout = {
+                                        closePanel {
+                                            sessionManager.clearSession()
+                                            isLoggedIn = false
+                                            navController.navigate("login") {
+                                                popUpTo("dashboard") { inclusive = true }
+                                            }
+                                        }
+                                    },
+                                )
+                            } else {
+                                if (scannerContentMode == ScanMode.SEARCH || scannerContentMode == ScanMode.DELIVERY) {
+                                    val isDeliveryScan = scannerContentMode == ScanMode.DELIVERY
+                                    var searchScanStatus by remember(scannerContentMode) { mutableStateOf("none") }
+                                    val searchBorderColor by animateColorAsState(
+                                        targetValue = when (searchScanStatus) {
+                                            "success" -> Color(0xFF4CAF50)
+                                            "error" -> Color(0xFFF44336)
+                                            else -> Color.White.copy(alpha = 0.5f)
+                                        },
+                                        label = "SearchBorderColor"
+                                    )
+
+                                    var isFlashOn by remember { mutableStateOf(false) }
+
+                                    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+                                        Box(modifier = Modifier.fillMaxSize()) {
+                                            ScannerView(
+                                                isFlashOn = isFlashOn,
+                                                isActive = scanReady && !isSearchScanProcessing,
+                                                onBarcodeDetected = { rawAwb ->
+                                                    if (isSearchScanProcessing) return@ScannerView
+
+                                                    val awb = normalizeAwb(rawAwb)
+                                                    if (awb == null) {
+                                                        searchScanStatus = "error"
+                                                        playSound(R.raw.scan_error)
+                                                        Toast.makeText(appContext, "Format AWB tidak valid (harus BE/BCE)", Toast.LENGTH_SHORT).show()
+                                                        return@ScannerView
+                                                    }
+
+                                                    if (isDeliveryScan) {
+                                                        searchScanStatus = "success"
+                                                        playSound(R.raw.scan_success)
+                                                        closePanel { navController.navigate("update_shipment/$awb") }
+                                                        return@ScannerView
+                                                    }
+
+                                                    isSearchScanProcessing = true
+                                                    lifecycleScope.launch {
+                                                        try {
+                                                            searchScanStatus = "loading"
+
+                                                            val userId = sessionManager.getUserId()
+                                                            if (userId.isNullOrBlank()) {
+                                                                searchScanStatus = "error"
+                                                                playSound(R.raw.scan_error)
+                                                                Toast.makeText(appContext, "Sesi berakhir, silakan login ulang", Toast.LENGTH_SHORT).show()
+                                                                return@launch
+                                                            }
+
+                                                            val lookup = NetworkModule.shipmentRepository.lookupShipmentDetailsByAwb(awb)
+                                                            if (lookup.isFailure) {
+                                                                throw lookup.exceptionOrNull() ?: IllegalStateException("Gagal mencari AWB")
+                                                            }
+                                                            val lookupResult = lookup.getOrThrow()
+                                                            val foundShipment = lookupResult.shipment
+                                                            val ownerId = foundShipment?.courier_id
+                                                            val ownerName = when {
+                                                                ownerId.isNullOrBlank() -> null
+                                                                ownerId == userId -> sessionManager.getBestCourierName()
+                                                                else -> fetchUserNameFromUsersTable(ownerId)
+                                                            }
+
+                                                            searchScanStatus = "success"
+                                                            playSound(R.raw.scan_success)
+                                                            closePanel {
+                                                                scannedDetailAwb = awb
+                                                                scannedDetailShipment = foundShipment
+                                                                scannedDetailIsRegistered = lookupResult.isRegisteredShipment
+                                                                scannedDetailOwnerName = ownerName
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            searchScanStatus = "error"
+                                                            playSound(R.raw.scan_error)
+                                                            Log.e("MainActivity", "Error in search scan", e)
+                                                            Toast.makeText(appContext, "Terjadi kesalahan: ${e.message}", Toast.LENGTH_LONG).show()
+                                                        } finally {
+                                                            isSearchScanProcessing = false
+                                                        }
+                                                    }
+                                                }
+                                            )
+
+                                            ScannerOverlay(
+                                                borderColor = searchBorderColor
+                                            )
+
+                                            // Header
+                                            ScannerToolbar(
+                                                title = if (isDeliveryScan) "Scan Delivery" else "Cari Detail AWB",
+                                                subtitle = if (isDeliveryScan) "Scan resi untuk langsung update status" else "Scan untuk melihat detail dan pemilik",
+                                                isFlashOn = isFlashOn,
+                                                onFlash = { isFlashOn = !isFlashOn },
+                                                onClose = { if (!isSearchScanProcessing) closePanel {} },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (scannerContentMode == ScanMode.BULK_UPDATE) {
+                                    var bulkUpdateScanStatus by remember { mutableStateOf("none") }
+                                    val bulkUpdateBorderColor by animateColorAsState(
+                                        targetValue = when (bulkUpdateScanStatus) {
+                                            "success" -> Color(0xFF4CAF50)
+                                            "error" -> Color(0xFFF44336)
+                                            else -> Color.White.copy(alpha = 0.5f)
+                                        },
+                                        label = "BulkUpdateBorderColor"
+                                    )
+                                    var isFlashOn by remember { mutableStateOf(false) }
+
+                                    Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+                                        Box(modifier = Modifier.fillMaxSize()) {
+                                            ScannerView(
+                                                isFlashOn = isFlashOn,
+                                                isActive = scanReady,
+                                                onBarcodeDetected = { rawAwb ->
+                                                    val awb = normalizeAwb(rawAwb)
+                                                    if (awb == null) {
+                                                        bulkUpdateScanStatus = "error"
+                                                        playSound(R.raw.scan_error)
+                                                        return@ScannerView
+                                                    }
+
+                                                    bulkUpdateScanStatus = "success"
+                                                    playSound(R.raw.scan_success)
+
+                                                    val currentAwbs = bulkAwbText.split(Regex("[,\\s\\n]+")).filter { it.isNotBlank() }
+                                                    if (!currentAwbs.contains(awb)) {
+                                                        bulkAwbText = if (bulkAwbText.isBlank()) {
+                                                            awb
+                                                        } else {
+                                                            bulkAwbText + "\n" + awb
+                                                        }
+                                                    }
+
+                                                    lifecycleScope.launch {
+                                                        delay(300)
+                                                        bulkUpdateScanStatus = "none"
+                                                    }
+                                                }
+                                            )
+
+                                            ScannerOverlay(
+                                                borderColor = bulkUpdateBorderColor
+                                            )
+
+                                            ScannerToolbar(
+                                                title = "Scan QR - Bulk Update",
+                                                subtitle = "Scan resi untuk mengisi field",
+                                                isFlashOn = isFlashOn,
+                                                onFlash = { isFlashOn = !isFlashOn },
+                                                onClose = { scanMode = ScanMode.NONE; showBulkDialog = true },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (scannerContentMode == ScanMode.CONTINUOUS) {
+                                    ContinuousScannerContent(
+                                        onDismiss = { closePanel {} },
+                                        isActive = scanReady,
+                                        onBarcodeDetected = { rawAwb ->
+                                            val awb = normalizeAwb(rawAwb)
+                                            if (awb == null) {
+                                                lastScanStatus = "error"
+                                                playSound(R.raw.scan_error)
+                                                return@ContinuousScannerContent
+                                            }
+
+                                            // Skip if currently processing this AWB
+                                            if (processingAwbs.contains(awb)) return@ContinuousScannerContent
+
+                                            // Reset status flash
+                                            lastScanStatus = "none"
+
+                                            if (successfulAwbs.contains(awb)) {
+                                                lastScanStatus = "duplicate"
+                                                playSound(R.raw.scan_error)
+                                                val item = ScannedItem(
+                                                    awb = awb,
+                                                    status = "duplicate",
+                                                    message = "Sudah discan di sesi ini"
+                                                )
+                                                scannedItems = listOf(item) + scannedItems.filter { it.awb != awb }
+                                                return@ContinuousScannerContent
+                                            }
+
+                                            processingAwbs.add(awb)
+                                            lifecycleScope.launch {
+                                                try {
+                                                    val userId = sessionManager.getUserId()
+                                                    if (userId.isNullOrBlank()) {
+                                                        lastScanStatus = "error"
+                                                        playSound(R.raw.scan_error)
+                                                        scannedItems = listOf(
+                                                            ScannedItem(awb, "error", "Sesi berakhir, silakan login ulang")
+                                                        ) + scannedItems.filter { it.awb != awb }
+                                                        return@launch
+                                                    }
+
+                                                    val courierName = sessionManager.getBestCourierName()
+                                                    when (
+                                                        val result = NetworkModule.shipmentRepository.assignShipmentToCourier(
+                                                            awb,
+                                                            userId,
+                                                            courierName
+                                                        )
+                                                    ) {
+                                                        is AssignmentOutcome.NewAssignment -> {
+                                                            successfulAwbs.markSuccessful(awb)
+                                                            lastScanStatus = "success"
+                                                            playSound(R.raw.scan_success)
+                                                            scannedItems = listOf(
+                                                                ScannedItem(awb, "success", "Berhasil masuk")
+                                                            ) + scannedItems.filter { it.awb != awb }
+                                                        }
+                                                        is AssignmentOutcome.Transferred -> {
+                                                            successfulAwbs.markSuccessful(awb)
+                                                            lastScanStatus = "transferred"
+                                                            playSound(R.raw.scan_success)
+                                                            scannedItems = listOf(
+                                                                ScannedItem(awb, "transferred", "Dialihkan ke Anda")
+                                                            ) + scannedItems.filter { it.awb != awb }
+                                                        }
+                                                        is AssignmentOutcome.AlreadyMine -> {
+                                                            successfulAwbs.markSuccessful(awb)
+                                                            lastScanStatus = "duplicate"
+                                                            playSound(R.raw.scan_error)
+                                                            scannedItems = listOf(
+                                                                ScannedItem(awb, "duplicate", "Sudah berada pada Anda")
+                                                            ) + scannedItems.filter { it.awb != awb }
+                                                        }
+                                                        is AssignmentOutcome.Delivered -> {
+                                                            lastScanStatus = "error"
+                                                            playSound(R.raw.scan_error)
+                                                            scannedItems = listOf(
+                                                                ScannedItem(awb, "error", "AWB sudah delivered")
+                                                            ) + scannedItems.filter { it.awb != awb }
+                                                        }
+                                                        is AssignmentOutcome.Failed -> {
+                                                            lastScanStatus = "error"
+                                                            playSound(R.raw.scan_error)
+                                                            scannedItems = listOf(
+                                                                ScannedItem(awb, "error", result.message)
+                                                            ) + scannedItems.filter { it.awb != awb }
+                                                        }
+                                                    }
+                                                } finally {
+                                                    processingAwbs.remove(awb)
+                                                }
+
+                                                delay(1000)
+                                                if (lastScanStatus != "none") {
+                                                    lastScanStatus = "none"
+                                                }
+                                            }
+                                        },
+                                        scannedItems = scannedItems,
+                                        lastScanStatus = lastScanStatus
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (isLoggedIn && !forceUpdateRequired && showVersionDialog) {
+                        AppVersionDialog(
+                            updateAvailable = updateAvailable,
+                            latestVersionName = latestVersionName,
+                            changelog = updateChangelog,
+                            hasCheckedForUpdate = hasCheckedForUpdate,
+                            isCheckingForUpdate = isCheckingForUpdate,
+                            updateCheckError = updateCheckError,
+                            isDownloading = isDownloadingUpdate,
+                            downloadProgressPercent = updateDownloadProgressPercent,
+                            isUpdateDownloaded = isUpdateDownloaded,
+                            updateDownloadError = updateDownloadError,
+                            onCheckForUpdate = {
+                                if (!isCheckingForUpdate && !isDownloadingUpdate) {
+                                    isCheckingForUpdate = true
+                                    updateCheckError = null
+                                    lifecycleScope.launch {
+                                        try {
+                                            val config = NetworkModule.shipmentRepository.getConfig()
+                                            if (config?.versioning == null) {
+                                                updateCheckError = "Informasi pembaruan belum tersedia. Periksa koneksi dan coba lagi."
+                                            } else {
+                                                applyVersioningConfig(config.versioning)
+                                            }
+                                        } catch (e: Exception) {
+                                            updateCheckError = "Tidak dapat memeriksa pembaruan. Periksa koneksi dan coba lagi."
+                                        } finally {
+                                            isCheckingForUpdate = false
+                                        }
+                                    }
+                                }
+                            },
+                            onDownloadUpdate = startDownloadUpdate,
+                            onInstallUpdate = startInstallUpdate,
+                            onDismiss = { showVersionDialog = false },
+                        )
+                    }
+                    if (isLoggedIn && !forceUpdateRequired && showNearbyCouriers) {
+                        NearbyCouriersDialog(onDismiss = { showNearbyCouriers = false })
+                    }
+                    if (isLoggedIn && !forceUpdateRequired && showSupportDialog) {
+                        CourierSupportDialog(onDismiss = { showSupportDialog = false })
+                    }
+
                     if (forceUpdateRequired) {
                         ForceUpdateDialog(
                             latestVersionName = latestVersionName,
@@ -2075,6 +2136,7 @@ class MainActivity : ComponentActivity() {
                             message = forceUpdateMessage
                         )
                     }
+                }
                 }
             }
         }

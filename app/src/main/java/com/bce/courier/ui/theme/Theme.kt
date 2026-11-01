@@ -51,7 +51,7 @@ fun BCECourierTheme(
             val window = (view.context as Activity).window
             val statusBarColor = if (darkTheme) colorScheme.surface else colorScheme.primary
             window.statusBarColor = statusBarColor.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
         }
     }
 

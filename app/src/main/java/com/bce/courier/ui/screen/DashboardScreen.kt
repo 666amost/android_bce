@@ -5,14 +5,7 @@ import android.content.Intent
 import android.location.Location
 import android.net.Uri
 import android.widget.Toast
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -24,9 +17,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -40,23 +34,17 @@ import androidx.compose.foundation.BorderStroke
 import androidx.core.net.toUri
 import com.bce.courier.data.model.ShipmentItem
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.lerp
 import com.bce.courier.tracking.CourierTrackingStatus
 import com.bce.courier.tracking.CourierTrackingLocationStore
-import com.bce.courier.ui.component.NearbyCouriersDialog
+import com.bce.courier.ui.component.CourierDashboardHeader
+import com.bce.courier.ui.component.CourierMotionSource
+import com.bce.courier.ui.component.CourierMotionOrigin
 import com.bce.courier.util.LocationHelper
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
-
-private val SUPPORT_CONTACTS = listOf(
-    "ROBERT" to "6282114097704",
-    "RENA PGK" to "6282185998199",
-    "AIDIL PNK" to "6289693418191"
-)
 
 private enum class AssignmentSortMode { SCAN_ORDER, NEAREST }
 
@@ -69,8 +57,8 @@ fun DashboardScreen(
     completedCount: Int,
     pendingCount: Int,
     pendingSyncCount: Int = 0,
-    trackingStatus: CourierTrackingStatus = CourierTrackingStatus.OFF,
     pointsScore: Int? = null,
+    trackingStatus: CourierTrackingStatus = CourierTrackingStatus.OFF,
     overdue14dCount: Int = 0,
     showOverdueDialog: Boolean = false,
     isLoading: Boolean,
@@ -78,37 +66,22 @@ fun DashboardScreen(
     cachedDataUpdatedAt: Long? = null,
     selectedTab: Int,
     updateAvailable: Boolean = false,
-    latestVersionName: String = "",
-    changelog: String = "",
-    isDownloading: Boolean = false,
-    downloadProgressPercent: Int? = null,
-    isUpdateDownloaded: Boolean = false,
-    updateDownloadError: String? = null,
     onTabSelected: (Int) -> Unit,
     onRefresh: () -> Unit,
-    onLogout: () -> Unit,
+    onProfileClick: () -> Unit,
     onShipmentClick: (ShipmentItem) -> Unit,
     onShipmentMapClick: (ShipmentItem) -> Unit,
     onSearchScanClick: () -> Unit,
-    onDeliveryScanClick: () -> Unit,
-    onContinuousScanClick: () -> Unit,
+    onScanMenuClick: () -> Unit,
     onUpdateClick: () -> Unit,
     onPickupClick: () -> Unit,
-    onClearStorage: () -> Unit = {},
-    onDownloadUpdate: () -> Unit = {},
-    onInstallUpdate: () -> Unit = {},
     onDismissOverdueDialog: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val tabs = listOf("Assigned", "Completed", "Pending")
-    var searchQuery by remember { mutableStateOf("") }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
     val isDarkMode = isSystemInDarkTheme()
-    var showUpdateDialog by remember { mutableStateOf(false) }
-    var showProfileMenu by remember { mutableStateOf(false) }
-    var showSupportDialog by remember { mutableStateOf(false) }
-    var showNearbyCouriers by remember { mutableStateOf(false) }
-    var showScanModeDialog by remember { mutableStateOf(false) }
-    var assignmentSortMode by remember { mutableStateOf(AssignmentSortMode.SCAN_ORDER) }
+    var assignmentSortMode by rememberSaveable { mutableStateOf(AssignmentSortMode.SCAN_ORDER) }
     var showAssignmentSortMenu by remember { mutableStateOf(false) }
     var distanceByAwb by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
     val geocodedDestinationCache = remember { mutableMapOf<String, Pair<Double, Double>?>() }
@@ -116,26 +89,6 @@ fun DashboardScreen(
     var distanceSortMessage by remember { mutableStateOf<String?>(null) }
 
     var isOnline by remember { mutableStateOf(true) }
-    val isTrackingActive = isOnline && trackingStatus == CourierTrackingStatus.ACTIVE
-    val trackingPulse = rememberInfiniteTransition(label = "trackingPulse")
-    val trackingDotAlpha by trackingPulse.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.25f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "trackingDotAlpha"
-    )
-
-    val onlineStatusLabel = when {
-        !isOnline -> "Offline"
-        trackingStatus == CourierTrackingStatus.ACTIVE -> "Online Track"
-        trackingStatus == CourierTrackingStatus.STARTING -> "Online Track..."
-        trackingStatus == CourierTrackingStatus.WAITING -> "Online Track wait"
-        else -> "Online"
-    }
-
     DisposableEffect(Unit) {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         val callback = object : android.net.ConnectivityManager.NetworkCallback() {
@@ -235,389 +188,114 @@ fun DashboardScreen(
 
     Scaffold(
         topBar = {
-            val topContainerColor = if (isDarkMode) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.primary
-            val topContentColor = if (isDarkMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
-
-            Surface(
-                color = topContainerColor,
-                contentColor = topContentColor
-            ) {
+            Surface(color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
                 Column(
-                    modifier = Modifier
-                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+                    modifier = Modifier.windowInsetsPadding(
+                        WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                    ),
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable { showProfileMenu = true }
-                                    .padding(vertical = 2.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Text(
-                                    text = "Hi,",
-                                    fontSize = 12.sp,
-                                    color = topContentColor.copy(alpha = 0.75f),
-                                    maxLines = 1
-                                )
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = userName,
-                                        fontSize = 18.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = topContentColor,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
-                                    Icon(
-                                        Icons.Default.ArrowDropDown,
-                                        contentDescription = "Menu",
-                                        tint = topContentColor.copy(alpha = 0.9f)
-                                    )
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .graphicsLayer {
-                                                alpha = if (isTrackingActive) trackingDotAlpha else 1f
-                                                scaleX = if (isTrackingActive) 1.08f else 1f
-                                                scaleY = if (isTrackingActive) 1.08f else 1f
-                                            }
-                                            .background(
-                                                if (isOnline) Color(0xFF4CAF50) else Color(0xFFF44336),
-                                                shape = RoundedCornerShape(99.dp)
-                                            )
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = onlineStatusLabel,
-                                        fontSize = 11.sp,
-                                        color = topContentColor.copy(alpha = 0.85f),
-                                        maxLines = 1
-                                    )
-
-                                    if (pendingCount > 0 && pointsScore != null) {
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        val clampedScore = pointsScore.coerceIn(1, 10)
-                                        val t = (clampedScore - 1) / 9f
-                                        val chipColor = lerp(Color(0xFFD32F2F), Color(0xFFFFC107), t)
-                                        Surface(
-                                            color = chipColor.copy(alpha = 0.18f),
-                                            contentColor = chipColor,
-                                            shape = RoundedCornerShape(99.dp),
-                                            border = BorderStroke(1.dp, chipColor.copy(alpha = 0.5f))
-                                        ) {
-                                            Text(
-                                                text = "Point $clampedScore",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            DropdownMenu(
-                                expanded = showProfileMenu,
-                                onDismissRequest = { showProfileMenu = false },
-                                modifier = Modifier.width(300.dp),
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Surface(
-                                        modifier = Modifier.size(42.dp),
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text(
-                                                text = userName.trim().firstOrNull()?.uppercase() ?: "K",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 18.sp,
-                                            )
-                                        }
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = userName,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            text = "Profil & pengaturan kurir",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                                HorizontalDivider()
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text("Kurir terdekat")
-                                            Text(
-                                                "Lihat posisi tim di sekitar",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    },
-                                    leadingIcon = { Icon(Icons.Default.PeopleAlt, contentDescription = null) },
-                                    onClick = {
-                                        showProfileMenu = false
-                                        showNearbyCouriers = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text("Bersihkan cache")
-                                            Text(
-                                                "Antrean offline dan POD tetap aman",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    },
-                                    leadingIcon = { Icon(Icons.Default.CleaningServices, contentDescription = null) },
-                                    onClick = {
-                                        showProfileMenu = false
-                                        onClearStorage()
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text("Bantuan & support")
-                                            Text(
-                                                "Hubungi tim operasional",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    },
-                                    leadingIcon = { Icon(Icons.Default.HeadsetMic, contentDescription = null) },
-                                    onClick = {
-                                        showProfileMenu = false
-                                        showSupportDialog = true
-                                    }
-                                )
-                                HorizontalDivider()
-                                DropdownMenuItem(
-                                    text = { Text("Keluar", color = MaterialTheme.colorScheme.error) },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.AutoMirrored.Filled.ExitToApp,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.error,
-                                        )
-                                    },
-                                    onClick = {
-                                        showProfileMenu = false
-                                        onLogout()
-                                    },
-                                )
-                            }
-                        }
-
-                        if (pendingSyncCount > 0) {
-                            Surface(
-                                color = topContentColor.copy(alpha = 0.12f),
-                                shape = MaterialTheme.shapes.small
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.CloudUpload,
-                                        contentDescription = "Syncing",
-                                        modifier = Modifier.size(14.dp),
-                                        tint = topContentColor
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = formatCountModern(pendingSyncCount),
-                                        fontSize = 11.sp,
-                                        color = topContentColor
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(6.dp))
-                        }
-
-                        if (updateAvailable) {
-                            IconButton(onClick = { showUpdateDialog = true }) {
-                                Box {
-                                    Icon(
-                                        Icons.Default.SystemUpdate,
-                                        contentDescription = "Update Available",
-                                        tint = topContentColor
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .size(10.dp)
-                                            .background(Color(0xFFF44336), shape = RoundedCornerShape(99.dp))
-                                    )
-                                }
-                            }
-                        }
-
-                        IconButton(onClick = onRefresh) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = topContentColor)
-                        }
-                    }
-
-                    val searchContainerColor = if (isDarkMode) MaterialTheme.colorScheme.surfaceVariant else Color.White
-                    val searchTextColor = if (isDarkMode) MaterialTheme.colorScheme.onSurface else Color.Black
+                    CourierDashboardHeader(
+                        userName = userName,
+                        isOnline = isOnline,
+                        trackingStatus = trackingStatus,
+                        pendingSyncCount = pendingSyncCount,
+                        pointsScore = if (pendingCount > 0) pointsScore else null,
+                        updateAvailable = updateAvailable,
+                        isRefreshing = isLoading,
+                        onProfileClick = onProfileClick,
+                        onRefresh = onRefresh,
+                    )
 
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        placeholder = { Text("Cari AWB / nama penerima", fontSize = 14.sp, color = searchTextColor.copy(alpha = 0.6f)) },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = searchTextColor.copy(alpha = 0.8f)) },
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                        placeholder = {
+                            Text(
+                                "Cari AWB / nama penerima",
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                        },
                         trailingIcon = {
-                            IconButton(onClick = onSearchScanClick) {
-                                Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan", tint = searchTextColor.copy(alpha = 0.9f))
+                            CourierMotionSource(CourierMotionOrigin.Search, Modifier.size(48.dp)) { sharedModifier ->
+                                IconButton(onClick = onSearchScanClick, modifier = sharedModifier.fillMaxSize()) {
+                                    Icon(Icons.Default.QrCodeScanner, contentDescription = "Cari dengan scan AWB", modifier = Modifier.size(22.dp))
+                                }
                             }
                         },
                         singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(12.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = searchContainerColor,
-                            unfocusedContainerColor = searchContainerColor,
-                            focusedBorderColor = Color.Transparent,
+                            focusedContainerColor = if (isDarkMode) MaterialTheme.colorScheme.surfaceVariant else Color.White,
+                            unfocusedContainerColor = if (isDarkMode) MaterialTheme.colorScheme.surfaceVariant else Color.White,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
                             unfocusedBorderColor = Color.Transparent,
-                            focusedTextColor = searchTextColor,
-                            unfocusedTextColor = searchTextColor,
-                            cursorColor = searchTextColor
-                        )
+                        ),
                     )
-
-                    val indicatorColor = if (isDarkMode) MaterialTheme.colorScheme.primary else topContentColor
 
                     TabRow(
                         selectedTabIndex = selectedTab,
-                        containerColor = Color.Transparent,
-                        contentColor = topContentColor,
-                        indicator = { tabPositions ->
-                            if (tabPositions.isNotEmpty() && selectedTab < tabPositions.size) {
-                                val currentTabPosition = tabPositions[selectedTab]
-                                val currentTabWidth by animateDpAsState(
-                                    targetValue = currentTabPosition.width,
-                                    animationSpec = tween(
-                                        durationMillis = 250,
-                                        easing = FastOutSlowInEasing
-                                    ),
-                                    label = "tabWidth"
-                                )
-                                val indicatorOffset by animateDpAsState(
-                                    targetValue = currentTabPosition.left,
-                                    animationSpec = tween(
-                                        durationMillis = 250,
-                                        easing = FastOutSlowInEasing
-                                    ),
-                                    label = "tabIndicatorOffset"
-                                )
-                                Box(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .wrapContentSize(Alignment.BottomStart)
-                                        .offset(x = indicatorOffset)
-                                        .width(currentTabWidth)
-                                        .height(2.dp)
-                                        .background(
-                                            color = indicatorColor,
-                                            shape = RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
-                                        )
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        indicator = { positions ->
+                            if (selectedTab in positions.indices) {
+                                TabRowDefaults.Indicator(
+                                    modifier = Modifier.tabIndicatorOffset(positions[selectedTab]),
+                                    height = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary,
                                 )
                             }
                         },
-                        divider = {}
+                        divider = {},
                     ) {
                         tabs.forEachIndexed { index, title ->
                             val count = when (index) {
                                 0 -> assignedCount
                                 1 -> completedCount
-                                2 -> pendingCount
-                                else -> 0
+                                else -> pendingCount
                             }
-                            val formattedCount = formatCountModern(count)
                             val isSelected = selectedTab == index
-                            val isPendingTab = index == 2
-
                             Tab(
                                 selected = isSelected,
                                 onClick = { onTabSelected(index) },
-                                modifier = Modifier.heightIn(min = 44.dp),
-                                unselectedContentColor = topContentColor.copy(alpha = 0.75f),
-                                selectedContentColor = topContentColor,
+                                modifier = Modifier.heightIn(min = 48.dp),
+                                selectedContentColor = MaterialTheme.colorScheme.onPrimary,
+                                unselectedContentColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
                                 text = {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         Text(
-                                            text = title,
+                                            title,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                            fontSize = 13.sp,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
-                                            fontSize = 13.sp,
-                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
+                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                                         )
-                                        if (formattedCount.isNotEmpty()) {
-                                            val warningBase = Color(0xFFFFC107)
-
-                                            val chipBg = when {
-                                                isPendingTab && isSelected -> warningBase.copy(alpha = 0.26f)
-                                                isPendingTab -> warningBase.copy(alpha = 0.18f)
-                                                isSelected -> topContentColor.copy(alpha = 0.16f)
-                                                else -> topContentColor.copy(alpha = 0.10f)
-                                            }
-
-                                            val chipFg = when {
-                                                isPendingTab -> warningBase
-                                                isSelected -> topContentColor
-                                                else -> topContentColor.copy(alpha = 0.92f)
-                                            }
-
+                                        if (count > 0) {
                                             Surface(
-                                                color = chipBg,
-                                                shape = RoundedCornerShape(999.dp)
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = if (isSelected) 0.22f else 0.12f),
+                                                contentColor = MaterialTheme.colorScheme.onPrimary,
                                             ) {
                                                 Text(
-                                                    text = formattedCount,
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = chipFg,
-                                                    maxLines = 1
+                                                    formatCountModern(count),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                                    maxLines = 1,
                                                 )
                                             }
                                         }
                                     }
-                                }
+                                },
                             )
                         }
                     }
@@ -663,14 +341,17 @@ fun DashboardScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                            SideTonalButton(
-                                label = "Update",
-                                icon = Icons.Default.EditNote,
-                                containerColor = sideContainer,
-                                contentColor = sideContent,
-                                width = sideButtonWidth,
-                                onClick = onUpdateClick
-                            )
+                            CourierMotionSource(CourierMotionOrigin.Update, Modifier.width(sideButtonWidth).height(48.dp)) { sharedModifier ->
+                                SideTonalButton(
+                                    label = "Update",
+                                    icon = Icons.Default.EditNote,
+                                    containerColor = sideContainer,
+                                    contentColor = sideContent,
+                                    width = sideButtonWidth,
+                                    onClick = onUpdateClick,
+                                    modifier = sharedModifier,
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.width(fabSize + 12.dp))
@@ -695,28 +376,21 @@ fun DashboardScreen(
                     label = "fabScale"
                 )
 
-                FloatingActionButton(
-                    onClick = { showScanModeDialog = true },
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .offset(y = (-fabLift))
-                        .size(fabSize)
-                        .scale(fabScale),
-                    containerColor = scanBg,
-                    contentColor = scanFg,
-                    shape = RoundedCornerShape(18.dp),
-                    interactionSource = fabInteraction,
-                    elevation = FloatingActionButtonDefaults.elevation(
-                        defaultElevation = 8.dp,
-                        pressedElevation = 10.dp
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.QrCodeScanner,
-                        contentDescription = "Scan",
-                        modifier = Modifier.size(26.dp),
-                        tint = scanIconTint
-                    )
+                CourierMotionSource(
+                    CourierMotionOrigin.Scan,
+                    Modifier.align(Alignment.TopCenter).offset(y = -fabLift).size(fabSize),
+                ) { sharedModifier ->
+                    FloatingActionButton(
+                        onClick = onScanMenuClick,
+                        modifier = sharedModifier.fillMaxSize().scale(fabScale),
+                        containerColor = scanBg,
+                        contentColor = scanFg,
+                        shape = RoundedCornerShape(18.dp),
+                        interactionSource = fabInteraction,
+                        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 8.dp, pressedElevation = 10.dp),
+                    ) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan", modifier = Modifier.size(26.dp), tint = scanIconTint)
+                    }
                 }
             }
         }
@@ -909,298 +583,6 @@ fun DashboardScreen(
         }
     }
 
-    if (showScanModeDialog) {
-        AlertDialog(
-            onDismissRequest = { showScanModeDialog = false },
-            icon = {
-                Icon(
-                    Icons.Default.QrCodeScanner,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            },
-            title = {
-                Text(
-                    text = "Pilih Mode Scan",
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "Pilih jenis scan yang ingin digunakan.",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Button(
-                        onClick = {
-                            showScanModeDialog = false
-                            onContinuousScanClick()
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("SCAN MASUK")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            showScanModeDialog = false
-                            onDeliveryScanClick()
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("SCAN DELIVERY")
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showScanModeDialog = false }) {
-                    Text("Tutup")
-                }
-            }
-        )
-    }
-
-    if (showUpdateDialog && updateAvailable) {
-        AlertDialog(
-            onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
-            icon = {
-                Icon(
-                    Icons.Default.SystemUpdate,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(40.dp)
-                )
-            },
-            title = {
-                Text(
-                    text = "Update Tersedia",
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Versi Terbaru",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            Text(
-                                text = latestVersionName,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-                    }
-                    if (changelog.isNotBlank()) {
-                        Text(
-                            text = "Catatan Rilis:",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = changelog,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    if (!updateDownloadError.isNullOrBlank()) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Error,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = updateDownloadError,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                            }
-                        }
-                    }
-
-                    if (isUpdateDownloaded) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Column {
-                                    Text(
-                                        text = "Download selesai",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                                    )
-                                    Text(
-                                        text = "Klik Install untuk memasang update dari aplikasi.",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
-                                    )
-                                }
-                            }
-                        }
-                    } else if (isDownloading) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = "Mengunduh update...",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    if (downloadProgressPercent != null) {
-                                        Text(
-                                            text = "${downloadProgressPercent.coerceIn(0, 100)}%",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-
-                                if (downloadProgressPercent != null) {
-                                    LinearProgressIndicator(
-                                        progress = { downloadProgressPercent.coerceIn(0, 100) / 100f },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(6.dp)
-                                            .clip(RoundedCornerShape(999.dp))
-                                    )
-                                } else {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(6.dp)
-                                            .clip(RoundedCornerShape(999.dp))
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (isUpdateDownloaded) onInstallUpdate() else onDownloadUpdate()
-                    },
-                    enabled = !isDownloading
-                ) {
-                    val label = when {
-                        isUpdateDownloaded -> "Install"
-                        isDownloading -> "Mengunduh..."
-                        else -> "Download"
-                    }
-                    Text(label)
-                }
-            },
-            dismissButton = {
-                if (!isDownloading) {
-                    TextButton(onClick = { showUpdateDialog = false }) {
-                        Text("Nanti")
-                    }
-                }
-            }
-        )
-    }
-
-    if (showNearbyCouriers) {
-        NearbyCouriersDialog(
-            onDismiss = { showNearbyCouriers = false },
-        )
-    }
-
-    if (showSupportDialog) {
-        AlertDialog(
-            onDismissRequest = { showSupportDialog = false },
-            icon = {
-                Icon(
-                    Icons.Default.HeadsetMic,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            },
-            title = { Text("Support") },
-            text = {
-                Column {
-                    SUPPORT_CONTACTS.forEach { (name, phone) ->
-                        ListItem(
-                            headlineContent = { Text(name) },
-                            supportingContent = { Text("+$phone") },
-                            modifier = Modifier.clickable {
-                                showSupportDialog = false
-                                openWhatsAppContact(context, phone)
-                            }
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showSupportDialog = false }) {
-                    Text("Tutup")
-                }
-            }
-        )
-    }
-
     if (showOverdueDialog && overdue14dCount > 0) {
         AlertDialog(
             onDismissRequest = onDismissOverdueDialog,
@@ -1221,34 +603,6 @@ fun DashboardScreen(
                 }
             }
         )
-    }
-}
-
-private fun openWhatsAppContact(context: Context, phoneE164: String) {
-    val digits = phoneE164.replace(Regex("\\D"), "")
-    if (digits.isBlank()) {
-        Toast.makeText(context.applicationContext, "Nomor WhatsApp tidak valid", Toast.LENGTH_SHORT).show()
-        return
-    }
-
-    val uri = "https://wa.me/$digits".toUri()
-    val flags = Intent.FLAG_ACTIVITY_NEW_TASK
-
-    val whatsappIntents = listOf(
-        Intent(Intent.ACTION_VIEW, uri).setPackage("com.whatsapp").addFlags(flags),
-        Intent(Intent.ACTION_VIEW, uri).setPackage("com.whatsapp.w4b").addFlags(flags),
-        Intent(Intent.ACTION_VIEW, uri).addFlags(flags)
-    )
-
-    val opened = whatsappIntents.any { intent ->
-        runCatching {
-            context.startActivity(intent)
-            true
-        }.getOrDefault(false)
-    }
-
-    if (!opened) {
-        Toast.makeText(context.applicationContext, "Tidak bisa membuka WhatsApp", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -1631,7 +985,8 @@ private fun SideTonalButton(
     containerColor: Color,
     contentColor: Color,
     width: Dp,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -1642,7 +997,7 @@ private fun SideTonalButton(
 
     FilledTonalButton(
         onClick = onClick,
-        modifier = Modifier
+        modifier = modifier
             .height(48.dp)
             .width(width)
             .scale(scale),

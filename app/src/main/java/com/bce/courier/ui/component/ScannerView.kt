@@ -90,6 +90,7 @@ private data class BarcodeFeedback(
 @Composable
 fun ScannerView(
     isFlashOn: Boolean = false,
+    isActive: Boolean = true,
     onBarcodeDetected: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -113,12 +114,13 @@ fun ScannerView(
     }
     val onBarcodeDetectedState = rememberUpdatedState(onBarcodeDetected)
     val isFlashOnState = rememberUpdatedState(isFlashOn)
+    val isActiveState = rememberUpdatedState(isActive)
 
     var camera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
     var feedback by remember { mutableStateOf<BarcodeFeedback?>(null) }
 
-    LaunchedEffect(isFlashOn) {
-        camera?.cameraControl?.enableTorch(isFlashOn)
+    LaunchedEffect(isFlashOn, isActive) {
+        camera?.cameraControl?.enableTorch(isFlashOn && isActive)
     }
 
     LaunchedEffect(feedback?.timestamp) {
@@ -128,7 +130,10 @@ fun ScannerView(
     }
 
     val previewView = remember(context) {
-        PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
     }
 
     DisposableEffect(Unit) {
@@ -154,6 +159,10 @@ fun ScannerView(
                         .build()
                         .also { analysis ->
                             analysis.setAnalyzer(executor) { imageProxy ->
+                                if (!isActiveState.value) {
+                                    imageProxy.close()
+                                    return@setAnalyzer
+                                }
                                 val mediaImage = imageProxy.image
                                 if (mediaImage == null) {
                                     imageProxy.close()
@@ -167,6 +176,7 @@ fun ScannerView(
 
                                 scanner.process(image)
                                     .addOnSuccessListener(mainExecutor) { barcodes ->
+                                        if (disposed || !isActiveState.value) return@addOnSuccessListener
                                         val candidates = barcodes.mapNotNull { barcode ->
                                             val value = barcode.rawValue?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
                                             val bounds = barcode.boundingBox ?: return@mapNotNull null
@@ -250,7 +260,7 @@ fun ScannerView(
                         imageAnalysis,
                     )
                     camera = boundCamera
-                    boundCamera.cameraControl.enableTorch(isFlashOnState.value)
+                    boundCamera.cameraControl.enableTorch(isFlashOnState.value && isActiveState.value)
                 } catch (error: Exception) {
                     Log.e("ScannerView", "Binding failed", error)
                 }
