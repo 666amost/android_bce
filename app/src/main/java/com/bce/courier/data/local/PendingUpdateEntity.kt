@@ -1,6 +1,7 @@
 package com.bce.courier.data.local
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "pending_updates")
@@ -26,5 +27,8 @@ data class PendingUpdateEntity(
     val isSyncing: Boolean = false,
     val syncState: String = "queued",
     val lastError: String? = null,
+    val photoUrl: String? = null,
+    @ColumnInfo(defaultValue = "0") val deliverySynced: Boolean = false,
+    @ColumnInfo(defaultValue = "1") val isCameraPhoto: Boolean = true,
 )
 

@@ -14,9 +14,13 @@ import androidx.work.WorkerParameters
 import com.bce.courier.data.api.NetworkModule
 import com.bce.courier.data.api.SupabaseStorageService
 import com.bce.courier.data.local.AppDatabase
+import com.bce.courier.data.manager.SessionManager
+import com.bce.courier.data.repository.ShipmentRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -36,7 +40,7 @@ class SyncWorker(
                         geocoder.getFromLocation(latitude, longitude, 1) { addresses ->
                             val address = addresses.firstOrNull()
                             val parts = listOfNotNull(address?.subLocality, address?.subAdminArea, address?.adminArea)
-                            cont.resume(parts.joinToString(", ").ifBlank { null })
+                            if (cont.isActive) cont.resume(parts.joinToString(", ").ifBlank { null })
                         }
                     }
                 } else {
@@ -46,6 +50,8 @@ class SyncWorker(
                     val parts = listOfNotNull(address?.subLocality, address?.subAdminArea, address?.adminArea)
                     parts.joinToString(", ").ifBlank { null }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 null
             }
@@ -53,99 +59,77 @@ class SyncWorker(
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        try {
-            val db = AppDatabase.getInstance(applicationContext)
-            val dao = db.pendingUpdateDao()
-            dao.resetInterruptedSyncs()
+        NetworkModule.init(applicationContext)
+        val session = SessionManager(applicationContext)
+        val courierId = session.getUserId() ?: return@withContext Result.success()
+        val dao = AppDatabase.getInstance(applicationContext).pendingUpdateDao()
+        dao.resetInterruptedSyncs()
+        fun checkSession() {
+            if (session.getUserId() != courierId) throw SessionChangedException()
+        }
+        val processor = DeliverySyncProcessor(
+            uploadPhoto = { pending ->
+                checkSession()
+                val file = File(requireNotNull(pending.photoPath))
+                require(file.isFile && file.length() > 0) { "Foto bukti tidak ditemukan; ambil foto kembali" }
+                SupabaseStorageService.uploadImage(
+                    applicationContext, file, pending.awb, pending.isCameraPhoto,
+                    pending.courierName, pending.latitude?.let { "${it},${pending.longitude}" },
+                ) ?: throw java.io.IOException("Upload foto belum berhasil")
+            },
+            savePhotoUrl = dao::savePhotoUrl,
+            commitDelivery = { pending, photoUrl ->
+                checkSession()
+                val address = pending.locationAddress ?: if (pending.latitude != null && pending.longitude != null) {
+                    withTimeoutOrNull(2_000) { reverseGeocode(pending.latitude, pending.longitude) }
+                } else null
+                NetworkModule.shipmentRepository.updateShipmentDirectWithUrl(
+                    awb = pending.awb, status = pending.status, notes = pending.notes,
+                    pendingReasonCode = pending.pendingReasonCode, pendingReasonNote = pending.pendingReasonNote,
+                    lat = pending.latitude, lng = pending.longitude, photoUrl = photoUrl,
+                    courierName = pending.courierName, courierId = courierId, locationAddress = address,
+                ).getOrThrow()
+            },
+            markDeliverySynced = dao::markDeliverySynced,
+            syncBranch = { pending, photoUrl ->
+                checkSession()
+                NetworkModule.shipmentRepository.syncDeliveredToBranch(
+                    pending.awb, pending.status, photoUrl, pending.courierName,
+                    pending.armada, pending.platArmada,
+                ).getOrThrow()
+            },
+        )
 
-            val pending = dao.getNextPending() ?: return@withContext Result.success()
-
+        while (true) {
+            if (session.getUserId() != courierId) return@withContext Result.success()
+            val pending = dao.getNextPending(courierId) ?: return@withContext Result.success()
+            if (session.needsReauthentication()) return@withContext Result.retry()
             dao.setSync(pending.id, true)
-
             try {
-                var photoUrl: String? = null
-                val hasPhoto = !pending.photoPath.isNullOrBlank() && File(pending.photoPath).exists()
-
-                if (hasPhoto) {
-                    val file = File(pending.photoPath!!)
-
-                    photoUrl = SupabaseStorageService.uploadImage(
-                        applicationContext,
-                        file,
-                        pending.awb,
-                        true,
-                        pending.courierName,
-                        pending.latitude?.let { "${it},${pending.longitude}" }
-                    )
-
-                    if (photoUrl == null) {
-                        val error = "Upload foto gagal"
-                        val nextRetryCount = pending.retryCount + 1
-                        return@withContext if (nextRetryCount < MAX_RETRIES) {
-                            dao.incrementRetry(pending.id, error)
-                            Result.retry()
-                        } else {
-                            dao.markFailed(pending.id, error)
-                            Result.failure()
-                        }
-                    }
-                }
-
-                var finalLocationAddress = pending.locationAddress
-                if (finalLocationAddress.isNullOrBlank() && pending.latitude != null && pending.longitude != null) {
-                    finalLocationAddress = reverseGeocode(pending.latitude, pending.longitude)
-                }
-
-                val result = NetworkModule.shipmentRepository.updateShipmentDirectWithUrl(
-                    awb = pending.awb,
-                    status = pending.status,
-                    notes = pending.notes,
-                    pendingReasonCode = pending.pendingReasonCode,
-                    pendingReasonNote = pending.pendingReasonNote,
-                    lat = pending.latitude,
-                    lng = pending.longitude,
-                    photoUrl = photoUrl,
-                    courierName = pending.courierName,
-                    courierId = pending.courierId,
-                    armada = pending.armada,
-                    platArmada = pending.platArmada,
-                    locationAddress = finalLocationAddress
-                )
-
-                if (result.isSuccess) {
-                    dao.delete(pending.id)
-                    pending.photoPath?.let { runCatching { File(it).delete() } }
-
-                    sendRefreshBroadcast()
-
-                    if (dao.getNextPending() != null) {
-                        enqueueSyncWork(applicationContext)
-                    }
-                    Result.success()
-                } else {
-                    val error = result.exceptionOrNull()?.message ?: "Sinkronisasi gagal"
-                    val nextRetryCount = pending.retryCount + 1
-                    if (nextRetryCount < MAX_RETRIES) {
-                        dao.incrementRetry(pending.id, error)
-                        Result.retry()
-                    } else {
-                        dao.markFailed(pending.id, error)
-                        Result.failure()
-                    }
-                }
+                processor.sync(pending)
+                dao.delete(pending.id)
+                pending.photoPath?.let { runCatching { File(it).delete() } }
+                sendRefreshBroadcast()
+            } catch (error: SessionChangedException) {
+                dao.setSync(pending.id, false)
+                return@withContext Result.success()
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                val nextRetryCount = pending.retryCount + 1
-                if (nextRetryCount < MAX_RETRIES) {
-                    dao.incrementRetry(pending.id, error.message)
-                    Result.retry()
+                val permanent = error is IllegalArgumentException ||
+                    (error is ShipmentRepository.HttpStatusException && !error.retryable)
+                if (permanent || pending.retryCount + 1 >= MAX_RETRIES) {
+                    // Keep failed data and evidence visible; continue with other parcels.
+                    dao.markFailed(pending.id, error.message ?: "Sinkronisasi gagal")
+                    sendRefreshBroadcast()
                 } else {
-                    dao.markFailed(pending.id, error.message)
-                    Result.failure()
+                    dao.incrementRetry(pending.id, error.message)
+                    return@withContext Result.retry()
                 }
             }
-        } catch (_: Exception) {
-            Result.failure()
         }
+        @Suppress("UNREACHABLE_CODE")
+        Result.success()
     }
 
     private fun sendRefreshBroadcast() {
@@ -154,6 +138,8 @@ class SyncWorker(
         }
         applicationContext.sendBroadcast(intent)
     }
+
+    private class SessionChangedException : Exception()
 
     companion object {
         private const val WORK_NAME = "shipment_sync"
@@ -176,7 +162,7 @@ class SyncWorker(
             WorkManager.getInstance(context)
                 .enqueueUniqueWork(
                     WORK_NAME,
-                    ExistingWorkPolicy.REPLACE,
+                    ExistingWorkPolicy.APPEND_OR_REPLACE,
                     syncRequest
                 )
         }

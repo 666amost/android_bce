@@ -3,6 +3,7 @@ package com.bce.courier.ui.screen
 import android.location.Location
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -10,11 +11,9 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
@@ -24,12 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -42,6 +37,8 @@ import coil.compose.AsyncImage
 import com.bce.courier.data.model.ShipmentItem
 import com.bce.courier.data.model.DeliveryStatus
 import com.bce.courier.data.model.PendingReasons
+import com.bce.courier.ui.component.DeliveryCompletion
+import com.bce.courier.ui.component.DeliveryUpdateFeedback
 import com.bce.courier.tracking.CourierTrackingConfig
 import com.bce.courier.tracking.CourierTrackingLocationStore
 import com.bce.courier.util.LocationHelper
@@ -65,27 +62,26 @@ fun UpdateShipmentScreen(
         isCameraPhoto: Boolean,
     ) -> Unit,
     isUpdating: Boolean,
+    completion: DeliveryCompletion? = null,
+    onCompletionFinished: () -> Unit = {},
 ) {
     val isDarkTheme = isSystemInDarkTheme()
 
     val photoBoxBg = if (isDarkTheme) Color(0xFF2D2D2D) else Color(0xFFF5F5F5)
     val photoBoxBorder = if (isDarkTheme) Color(0xFF555555) else Color.LightGray
-    val successGreen = Color(0xFF2E7D32)
-    val successGreenLight = Color(0xFF4CAF50)
     val warningCardBg = if (isDarkTheme) Color(0xFF3E3527) else Color(0xFFFFF8E1)
     val warningIconColor = if (isDarkTheme) Color(0xFFFFCA28) else Color(0xFFF9A825)
     val warningTextColor = if (isDarkTheme) Color(0xFFE0C9A6) else Color(0xFF5D4037)
     val textPrimary = if (isDarkTheme) Color.White else Color(0xFF1A1A1A)
     val textSecondary = if (isDarkTheme) Color(0xFFB0B0B0) else Color.Gray
     val cardBg = if (isDarkTheme) MaterialTheme.colorScheme.surfaceVariant else Color.White
-    val overlayCardBg = if (isDarkTheme) MaterialTheme.colorScheme.surface else Color.White
     val cameraButtonColor = Color(0xFF0091EA)
     val galleryButtonColor = if (isDarkTheme) Color(0xFF616161) else Color(0xFF757575)
 
-    var selectedStatus by remember {
+    var selectedStatus by rememberSaveable(shipment.awb) {
         mutableStateOf("delivered")
     }
-    var notes by remember { mutableStateOf("") }
+    var notes by rememberSaveable(shipment.awb) { mutableStateOf("") }
     var pendingReasonCode by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingReasonNote by rememberSaveable { mutableStateOf("") }
     var photoUri by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -147,8 +143,9 @@ fun UpdateShipmentScreen(
         }
     }
 
-    val showSuccess = false
-    val overlayVisible = isUpdating
+    val showSuccess = completion != null
+    val busy = isUpdating || showSuccess
+    BackHandler(enabled = busy) {}
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -156,7 +153,7 @@ fun UpdateShipmentScreen(
                 TopAppBar(
                     title = { Text("Update Status", fontSize = 18.sp, fontWeight = FontWeight.Bold) },
                     navigationIcon = {
-                        IconButton(onClick = { if (!isUpdating) onBack() }, enabled = !isUpdating) {
+                        IconButton(onClick = { if (!busy) onBack() }, enabled = !busy) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     },
@@ -432,15 +429,11 @@ fun UpdateShipmentScreen(
                     exit = fadeOut(animationSpec = tween(200)) + shrinkVertically(animationSpec = tween(200))
                 ) {
                     Column {
-                        val buttonEnabled = !isUpdating
-                        val buttonContainer = when {
-                            showSuccess -> Color(0xFF2E7D32)
-                            else -> Color(0xFF2E7D32)
-                        }
+                        val buttonEnabled = !busy
 
                         Button(
                             onClick = {
-                                if (!isUpdating) {
+                                if (!busy) {
                                     onUpdate(
                                         selectedStatus,
                                         notes,
@@ -455,7 +448,7 @@ fun UpdateShipmentScreen(
                             modifier = Modifier.fillMaxWidth().height(48.dp),
                             enabled = buttonEnabled,
                             shape = MaterialTheme.shapes.medium,
-                            colors = ButtonDefaults.buttonColors(containerColor = buttonContainer)
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
                         ) {
                             AnimatedContent(
                                 targetState = when {
@@ -536,163 +529,12 @@ fun UpdateShipmentScreen(
             }
         }
 
-        val showOverlay = overlayVisible || showSuccess
-        val currentOverlayAlpha by animateFloatAsState(
-            targetValue = if (showOverlay) 1f else 0f,
-            animationSpec = tween(durationMillis = 250),
-            label = "overlayAlphaAnim"
+        DeliveryUpdateFeedback(
+            isSaving = isUpdating,
+            completion = completion,
+            awb = shipment.awb,
+            onFinished = onCompletionFinished,
         )
-
-        if (showOverlay || currentOverlayAlpha > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .alpha(currentOverlayAlpha)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
-                    ) {},
-                contentAlignment = Alignment.Center
-            ) {
-                val successScale by animateFloatAsState(
-                    targetValue = if (showSuccess) 1f else 0f,
-                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
-                    label = "successScale"
-                )
-
-                val checkmarkRotation by animateFloatAsState(
-                    targetValue = if (showSuccess) 0f else -90f,
-                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
-                    label = "checkRotation"
-                )
-
-                val pulseAnim = rememberInfiniteTransition(label = "pulse")
-                val pulseScale by pulseAnim.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 1.08f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(600, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "pulseScale"
-                )
-
-                AnimatedContent(
-                    targetState = showSuccess,
-                    transitionSpec = {
-                        fadeIn(animationSpec = tween(300)) + scaleIn(
-                            initialScale = 0.8f,
-                            animationSpec = tween(300)
-                        ) togetherWith fadeOut(animationSpec = tween(200)) + scaleOut(
-                            targetScale = 0.9f,
-                            animationSpec = tween(200)
-                        )
-                    },
-                    label = "overlayContent",
-                    modifier = Modifier.wrapContentSize(Alignment.Center)
-                ) { isSuccess ->
-                    if (isSuccess) {
-                        Surface(
-                            color = overlayCardBg,
-                            shape = MaterialTheme.shapes.extraLarge,
-                            tonalElevation = 12.dp,
-                            modifier = Modifier
-                                .wrapContentSize(Alignment.Center)
-                                .scale(successScale)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(32.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(80.dp)
-                                        .scale(pulseScale)
-                                        .background(
-                                            brush = Brush.radialGradient(
-                                                colors = listOf(
-                                                    successGreenLight,
-                                                    successGreen
-                                                )
-                                            ),
-                                            shape = CircleShape
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier
-                                            .size(48.dp)
-                                            .graphicsLayer { rotationZ = checkmarkRotation }
-                                    )
-                                }
-                                Text(
-                                    "Berhasil!",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 20.sp,
-                                    color = successGreen
-                                )
-                                Text(
-                                    "Status berhasil diupdate",
-                                    fontSize = 14.sp,
-                                    color = textSecondary,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                    } else {
-                        Surface(
-                            color = overlayCardBg,
-                            shape = MaterialTheme.shapes.large,
-                            tonalElevation = 8.dp,
-                            modifier = Modifier.wrapContentSize(Alignment.Center)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(64.dp)
-                                        .background(
-                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                            shape = CircleShape
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(36.dp),
-                                        strokeWidth = 3.dp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        "Mengupload Status",
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 16.sp,
-                                        color = textPrimary
-                                    )
-                                    Text(
-                                        "Mohon tunggu sebentar...",
-                                        fontSize = 13.sp,
-                                        color = textSecondary
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         if (showPhotoSourceDialog) {
             ModalBottomSheet(

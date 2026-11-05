@@ -34,6 +34,7 @@ fun CourierAccountScreen(
     isDownloadingUpdate: Boolean,
     onBack: () -> Unit,
     onNearbyCouriersClick: () -> Unit,
+    onSyncQueueClick: () -> Unit,
     onAppSettingsClick: () -> Unit,
     onClearCache: () -> Unit,
     onSupportClick: () -> Unit,
@@ -102,12 +103,11 @@ fun CourierAccountScreen(
                         leadingContent = { Icon(Icons.Default.MyLocation, contentDescription = null) },
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    ListItem(
-                        headlineContent = { Text("Sinkronisasi data") },
-                        supportingContent = {
-                            Text(if (pendingSyncCount > 0) "$pendingSyncCount pembaruan menunggu dikirim" else "Tidak ada antrean sinkronisasi")
-                        },
-                        leadingContent = { Icon(Icons.Default.CloudUpload, contentDescription = null) },
+                    AccountAction(
+                        title = "Sinkronisasi data",
+                        subtitle = if (pendingSyncCount > 0) "$pendingSyncCount pembaruan menunggu dikirim" else "Tidak ada antrean sinkronisasi",
+                        icon = Icons.Default.CloudUpload,
+                        onClick = onSyncQueueClick,
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     AccountAction("Kurir terdekat", "Lihat posisi tim di sekitar", Icons.Default.PeopleAlt, onNearbyCouriersClick)
@@ -119,8 +119,8 @@ fun CourierAccountScreen(
                     AccountAction("Izin aplikasi", "Kelola izin lokasi, kamera, dan notifikasi", Icons.Default.AdminPanelSettings, onAppSettingsClick)
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     AccountAction(
-                        title = "Bersihkan cache",
-                        subtitle = if (isDownloadingUpdate) "Tunggu unduhan pembaruan selesai" else "Antrean offline dan foto POD tetap tersimpan",
+                        title = "Bersihkan file sementara",
+                        subtitle = if (isDownloadingUpdate) "Tunggu unduhan pembaruan selesai" else "Draf AWB, antrean offline, dan foto POD tetap tersimpan",
                         icon = Icons.Default.CleaningServices,
                         onClick = onClearCache,
                         enabled = !isDownloadingUpdate,

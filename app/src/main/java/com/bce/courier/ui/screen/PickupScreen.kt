@@ -20,6 +20,23 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.bce.courier.data.local.PickupDraftStore
+import com.bce.courier.data.model.PickupFormState
+import com.bce.courier.data.model.paymentMethodLabel
+import com.bce.courier.util.normalizePickupNumber
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,6 +55,8 @@ import com.bce.courier.data.model.CustomerData
 import com.bce.courier.data.model.ManifestPayload
 import com.bce.courier.ui.component.CustomerSelectorDialog
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -68,27 +87,43 @@ private fun SelectAllOnFocusOutlinedTextField(
     trailingIcon: @Composable (() -> Unit)? = null,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     colors: TextFieldColors = OutlinedTextFieldDefaults.colors(),
+    emptyValueOnBlur: String = "0",
     shape: androidx.compose.ui.graphics.Shape = OutlinedTextFieldDefaults.shape
 ) {
     var hasFocus by remember { mutableStateOf(false) }
     var textFieldValue by remember { mutableStateOf(TextFieldValue(value)) }
 
-    LaunchedEffect(value, hasFocus) {
-        if (!hasFocus && value != textFieldValue.text) {
+    LaunchedEffect(value) {
+        if (value != textFieldValue.text) {
             textFieldValue = textFieldValue.copy(text = value, selection = TextRange(value.length))
         }
     }
 
     OutlinedTextField(
         value = textFieldValue,
-        onValueChange = {
-            textFieldValue = it
-            onValueChange(it.text)
+        onValueChange = { proposed ->
+            val normalized = normalizePickupNumber(proposed.text, keyboardOptions.keyboardType == KeyboardType.Decimal)
+            if (normalized != null) {
+                val removed = proposed.text.length - normalized.length
+                textFieldValue = if (normalized == proposed.text) proposed else proposed.copy(
+                    text = normalized,
+                    selection = TextRange(
+                        (proposed.selection.start - removed).coerceIn(0, normalized.length),
+                        (proposed.selection.end - removed).coerceIn(0, normalized.length),
+                    ),
+                    composition = null,
+                )
+                onValueChange(normalized)
+            }
         },
         modifier = modifier.onFocusChanged { focusState ->
             val isFocused = focusState.isFocused
             if (!hasFocus && isFocused) {
-                textFieldValue = textFieldValue.copy(selection = TextRange(0, textFieldValue.text.length))
+                textFieldValue = if (textFieldValue.text == "0") TextFieldValue("")
+                    else textFieldValue.copy(selection = TextRange(0, textFieldValue.text.length))
+            } else if (hasFocus && !isFocused && textFieldValue.text.isBlank()) {
+                textFieldValue = TextFieldValue(emptyValueOnBlur)
+                if (value != emptyValueOnBlur) onValueChange(emptyValueOnBlur)
             }
             hasFocus = isFocused
         },
@@ -133,28 +168,6 @@ private fun SectionHeader(
         }
     }
 }
-
-data class PickupFormState(
-    val awbNo: String = "",
-    val awbDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()),
-    val kirimVia: String = "udara",
-    val kotaTujuan: String = "",
-    val wilayah: String = "",
-    val metodePembayaran: String = "cash",
-    val agentCustomer: String = "",
-    val namaPengirim: String = "",
-    val nomorPengirim: String = "",
-    val namaPenerima: String = "",
-    val nomorPenerima: String = "",
-    val alamatPenerima: String = "",
-    val coli: String = "1",
-    val beratKg: String = "1",
-    val hargaPerKg: String = "0",
-    val biayaAdmin: String = "0",
-    val biayaPackaging: String = "0",
-    val biayaTransit: String = "0",
-    val isiBarang: String = ""
-)
 
 private val defaultKotaWilayahPusat = mapOf(
     "bangka" to listOf("Pangkal Pinang", "Sungailiat", "Belinyu", "Jebus", "Koba", "Toboali", "Mentok"),
@@ -205,7 +218,8 @@ fun PickupScreen(
     isConfigLoading: Boolean = false,
     agentOptions: List<String> = emptyList(),
     kotaWilayahPusatOptions: Map<String, List<String>> = emptyMap(),
-    hargaPerKgMapOptions: Map<String, Int> = emptyMap()
+    hargaPerKgMapOptions: Map<String, Int> = emptyMap(),
+    submittedAwb: String? = null,
 ) {
     val isDarkMode = isSystemInDarkTheme()
 
@@ -215,7 +229,7 @@ fun PickupScreen(
                 TopAppBar(
                     title = { Text("Memuat...", fontWeight = FontWeight.Bold) },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = onBack, enabled = !isSubmitting) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     },
@@ -287,7 +301,35 @@ fun PickupScreen(
         normalizedInput.ifEmpty { normalizedDefault }
     }
 
-    var form by remember { mutableStateOf(PickupFormState()) }
+    val context = LocalContext.current
+    val draftStore = remember(courierId) { PickupDraftStore(context, courierId) }
+    val formSaver = remember {
+        Saver<PickupFormState, String>(
+            save = { Json.encodeToString(it) },
+            restore = { runCatching { Json.decodeFromString<PickupFormState>(it) }.getOrNull() },
+        )
+    }
+    var form by rememberSaveable(courierId, stateSaver = formSaver) { mutableStateOf(draftStore.load()) }
+    LaunchedEffect(submittedAwb) {
+        submittedAwb?.let { form = form.copy(awbNo = it, submissionAttempted = true) }
+    }
+    LaunchedEffect(form) { draftStore.save(form) }
+    LaunchedEffect(courierId) {
+        while (isActive) {
+            form = form.withCurrentDate()
+            delay(30_000)
+        }
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) form = form.withCurrentDate()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showResetDraft by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
 
@@ -322,8 +364,9 @@ fun PickupScreen(
     var kirimViaExpanded by remember { mutableStateOf(false) }
     var metodePembayaranExpanded by remember { mutableStateOf(false) }
     var agentExpanded by remember { mutableStateOf(false) }
-    var hargaPerKgManuallyEdited by remember { mutableStateOf(false) }
-    var lastWilayahKeyForHargaSync by remember { mutableStateOf<String?>(null) }
+    var lastWilayahKeyForHargaSync by rememberSaveable(courierId) {
+        mutableStateOf(form.wilayah.trim().lowercase(Locale.ROOT))
+    }
 
     val awbBringIntoViewRequester = remember { BringIntoViewRequester() }
     val awbFocusRequester = remember { FocusRequester() }
@@ -359,7 +402,7 @@ fun PickupScreen(
     val metodePembayaranFocusRequester = remember { FocusRequester() }
 
     val kotaTujuanList = resolvedKotaWilayahPusat.keys.toList()
-    val wilayahOptions = remember(form.kotaTujuan) {
+    val wilayahOptions = remember(form.kotaTujuan, resolvedKotaWilayahPusat) {
         resolvedKotaWilayahPusat[form.kotaTujuan] ?: emptyList()
     }
 
@@ -367,10 +410,10 @@ fun PickupScreen(
         val key = form.wilayah.trim().lowercase(Locale.ROOT)
         if (lastWilayahKeyForHargaSync != key) {
             lastWilayahKeyForHargaSync = key
-            hargaPerKgManuallyEdited = false
+            form = form.copy(priceManuallyEdited = false)
         }
 
-        if (hargaPerKgManuallyEdited) return@LaunchedEffect
+        if (form.priceManuallyEdited) return@LaunchedEffect
 
         val harga = resolvedHargaPerKgMap[key] ?: 0
         if (harga > 0 && form.hargaPerKg != harga.toString()) {
@@ -391,33 +434,17 @@ fun PickupScreen(
         subTotal + admin + packaging + transit
     }
 
-    fun generateAwbNo(): String {
-        val timestamp = System.currentTimeMillis().toString()
-        val lastSix = timestamp.takeLast(6)
-        return "BCE${lastSix}JKT"
-    }
-
     fun formatRupiah(amount: Int): String {
         return NumberFormat.getCurrencyInstance(Locale("id", "ID")).format(amount)
     }
 
     fun applyCustomerData(customer: CustomerData) {
-        form = form.copy(
-            namaPengirim = customer.namaPengirim,
-            nomorPengirim = customer.nomorPengirim,
-            namaPenerima = customer.namaPenerima,
-            nomorPenerima = customer.nomorPenerima,
-            alamatPenerima = customer.alamatPenerima,
-            kotaTujuan = customer.kotaTujuan,
-            wilayah = customer.wilayah,
-            kirimVia = customer.kirimVia.ifBlank { "udara" },
-            metodePembayaran = customer.metodePembayaran.ifBlank { "cash" },
-            agentCustomer = customer.agentCustomer,
-            isiBarang = customer.isiBarang
-        )
+        form = form.withCustomer(customer)
     }
 
     fun validateAndSubmit() {
+        if (isSubmitting) return
+        form = form.withCurrentDate()
         showValidationErrors = true
 
         val firstMissing = when {
@@ -514,9 +541,67 @@ fun PickupScreen(
             biayaTransit = form.biayaTransit.toIntOrNull() ?: 0,
             total = total,
             isiBarang = form.isiBarang,
-            courierId = courierId
+            courierId = courierId,
+            isRetry = form.submissionAttempted,
         )
+        form = form.copy(submissionAttempted = true)
+        draftStore.save(form)
         onSubmit(payload)
+    }
+
+    if (isSubmitting) {
+        Dialog(onDismissRequest = {}, properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)) {
+            Surface(shape = RoundedCornerShape(16.dp)) {
+                Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text("Menyimpan resi...")
+                }
+            }
+        }
+    }
+    if (showDatePicker) {
+        val dateState = rememberDatePickerState(
+            initialSelectedDateMillis = runCatching {
+                LocalDate.parse(form.awbDate).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
+            }.getOrNull(),
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    dateState.selectedDateMillis?.let {
+                        form = form.copy(
+                            awbDate = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toString(),
+                            dateManuallySelected = true,
+                        )
+                    }
+                    showDatePicker = false
+                }, enabled = dateState.selectedDateMillis != null) { Text("Pilih tanggal") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    form = form.copy(dateManuallySelected = false).withCurrentDate()
+                    showDatePicker = false
+                }) { Text("Hari ini") }
+            },
+        ) { DatePicker(state = dateState) }
+    }
+    if (showResetDraft) {
+        AlertDialog(
+            onDismissRequest = { showResetDraft = false },
+            title = { Text("Reset formulir?") },
+            text = { Text("Isian draf saat ini akan dikosongkan.") },
+            confirmButton = { TextButton(onClick = {
+                form = PickupFormState()
+                showValidationErrors = false
+                draftStore.clear()
+                showResetDraft = false
+            }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                Text("Reset")
+            } },
+            dismissButton = { TextButton(onClick = { showResetDraft = false }) { Text("Batal") } },
+        )
     }
 
     if (showCustomerSelector) {
@@ -538,7 +623,7 @@ fun PickupScreen(
             TopAppBar(
                 title = { Text("Pickup AWB", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, enabled = !isSubmitting) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -594,7 +679,8 @@ fun PickupScreen(
                             }
                         )
                         OutlinedButton(
-                            onClick = { form = form.copy(awbNo = generateAwbNo()) },
+                            onClick = { form = form.withNewAwb() },
+                            enabled = !isSubmitting,
                             shape = RoundedCornerShape(8.dp),
                             border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
                         ) {
@@ -603,6 +689,43 @@ fun PickupScreen(
                             Text("Generate", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                         }
                     }
+                }
+            }
+
+            OutlinedButton(
+                onClick = { showDatePicker = true },
+                enabled = !isSubmitting,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.DateRange, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Tanggal resi: ${form.awbDate}")
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Draf tersimpan otomatis",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = { showResetDraft = true },
+                    enabled = !isSubmitting,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f),
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                ) {
+                    Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Reset form", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 }
             }
 
@@ -876,6 +999,7 @@ fun PickupScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         SelectAllOnFocusOutlinedTextField(
                             value = form.coli,
+                            emptyValueOnBlur = "1",
                             onValueChange = { form = form.copy(coli = it) },
                             label = { Text("Coli") },
                             modifier = Modifier.weight(1f),
@@ -887,6 +1011,7 @@ fun PickupScreen(
 
                         SelectAllOnFocusOutlinedTextField(
                             value = form.beratKg,
+                            emptyValueOnBlur = "1",
                             onValueChange = { form = form.copy(beratKg = it) },
                             label = { Text("Berat (kg)") },
                             modifier = Modifier.weight(1f),
@@ -900,8 +1025,7 @@ fun PickupScreen(
                     SelectAllOnFocusOutlinedTextField(
                         value = form.hargaPerKg,
                         onValueChange = {
-                            hargaPerKgManuallyEdited = true
-                            form = form.copy(hargaPerKg = it)
+                            form = form.copy(hargaPerKg = it, priceManuallyEdited = true)
                         },
                         label = { Text("Harga per kg") },
                         modifier = Modifier.fillMaxWidth(),
@@ -963,7 +1087,7 @@ fun PickupScreen(
                         onExpandedChange = { metodePembayaranExpanded = it }
                     ) {
                         OutlinedTextField(
-                            value = form.metodePembayaran.replaceFirstChar { it.uppercase() },
+                            value = paymentMethodLabel(form.metodePembayaran),
                             onValueChange = {},
                             readOnly = true,
                             label = { RequiredLabel("Metode Pembayaran") },
@@ -986,7 +1110,7 @@ fun PickupScreen(
                                 DropdownMenuItem(
                                     text = { Text(metode.uppercase()) },
                                     onClick = {
-                                        form = form.copy(metodePembayaran = metode)
+                                        form = form.copy(metodePembayaran = metode, paymentManuallySelected = true)
                                         metodePembayaranExpanded = false
                                     }
                                 )
@@ -1121,6 +1245,15 @@ fun PickupScreen(
                             Text(formatRupiah(total), fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
                         }
                     }
+                }
+            }
+
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(12.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(form.awbNo.ifBlank { "Nomor resi belum dibuat" }, fontWeight = FontWeight.Bold)
+                    Text("Tanggal: ${form.awbDate}")
+                    Text("Pembayaran: ${paymentMethodLabel(form.metodePembayaran)}", fontWeight = FontWeight.Bold)
+                    Text("Penerima: ${form.namaPenerima.ifBlank { "-" }}")
                 }
             }
 

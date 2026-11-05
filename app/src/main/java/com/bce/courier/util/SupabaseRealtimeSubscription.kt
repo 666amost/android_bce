@@ -51,7 +51,7 @@ class SupabaseRealtimeSubscription {
     private var lastTable: String? = null
     private var lastFilter: String? = null
     private var lastEvents: List<String> = listOf("*")
-    private var lastAccessToken: String? = null
+    private var lastAccessTokenProvider: (() -> String?)? = null
     private var lastCallback: ((PostgresChange) -> Unit)? = null
 
     fun start(
@@ -60,6 +60,7 @@ class SupabaseRealtimeSubscription {
         filter: String?,
         events: List<String> = listOf("*"),
         accessToken: String?,
+        accessTokenProvider: (() -> String?)? = null,
         onPostgresChange: (PostgresChange) -> Unit
     ) {
         stop()
@@ -69,7 +70,7 @@ class SupabaseRealtimeSubscription {
         lastTable = table
         lastFilter = filter
         lastEvents = events.ifEmpty { listOf("*") }
-        lastAccessToken = accessToken
+        lastAccessTokenProvider = accessTokenProvider ?: { accessToken }
         lastCallback = onPostgresChange
 
         connect()
@@ -87,7 +88,7 @@ class SupabaseRealtimeSubscription {
         lastScope = null
         lastTable = null
         lastFilter = null
-        lastAccessToken = null
+        lastAccessTokenProvider = null
         lastCallback = null
     }
 
@@ -96,7 +97,7 @@ class SupabaseRealtimeSubscription {
         val table = lastTable ?: return
         val filter = lastFilter
         val events = lastEvents
-        val accessToken = lastAccessToken
+        val accessToken = lastAccessTokenProvider?.invoke()
         val onPostgresChange = lastCallback ?: return
 
         val wsUrl = buildRealtimeWebSocketUrl(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_ANON_KEY)

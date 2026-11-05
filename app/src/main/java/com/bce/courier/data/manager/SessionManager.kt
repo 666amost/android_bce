@@ -43,7 +43,8 @@ class SessionManager(context: Context) {
             putString("user_id", userId)
             putString("full_name", fullName)
             putLong("session_saved_at", System.currentTimeMillis())
-            if (refreshToken != null) putString("refresh_token", refreshToken)
+            putBoolean("needs_reauthentication", false)
+            putString("refresh_token", refreshToken)
             apply()
         }
     }
@@ -68,6 +69,10 @@ class SessionManager(context: Context) {
 
     fun getAccessToken(): String? = try { prefs.getString("access_token", null) } catch (_: Exception) { null }
     fun getRefreshToken(): String? = try { prefs.getString("refresh_token", null) } catch (_: Exception) { null }
+    fun needsReauthentication(): Boolean = prefs.getBoolean("needs_reauthentication", false)
+    fun setNeedsReauthentication(required: Boolean) {
+        prefs.edit().putBoolean("needs_reauthentication", required).apply()
+    }
     fun getUserEmail(): String? = try { prefs.getString("user_email", null) } catch (_: Exception) { null }
     fun getUserId(): String? = try { prefs.getString("user_id", null) } catch (_: Exception) { null }
     fun getFullName(): String? = try { prefs.getString("full_name", null) } catch (_: Exception) { null }
@@ -89,6 +94,7 @@ class SessionManager(context: Context) {
 
     fun updateAccessToken(newToken: String, newRefreshToken: String? = null) {
         prefs.edit().apply {
+            putBoolean("needs_reauthentication", false)
             putString("access_token", newToken)
             putLong("session_saved_at", System.currentTimeMillis())
             if (newRefreshToken != null) putString("refresh_token", newRefreshToken)
@@ -104,6 +110,7 @@ class SessionManager(context: Context) {
             remove("user_id")
             remove("full_name")
             remove("session_saved_at")
+            remove("needs_reauthentication")
             apply()
         }
     }
@@ -128,5 +135,5 @@ class SessionManager(context: Context) {
         }
     }
 
-    fun isLoggedIn(): Boolean = getAccessToken() != null && getUserId() != null
+    fun isLoggedIn(): Boolean = getAccessToken() != null && getUserId() != null && !needsReauthentication()
 }

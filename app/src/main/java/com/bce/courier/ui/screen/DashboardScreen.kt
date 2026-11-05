@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -35,7 +36,7 @@ import androidx.core.net.toUri
 import com.bce.courier.data.model.ShipmentItem
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import com.bce.courier.tracking.CourierTrackingStatus
 import com.bce.courier.tracking.CourierTrackingLocationStore
 import com.bce.courier.ui.component.CourierDashboardHeader
@@ -65,6 +66,7 @@ fun DashboardScreen(
     isShowingCachedData: Boolean = false,
     cachedDataUpdatedAt: Long? = null,
     selectedTab: Int,
+    isActive: Boolean = true,
     updateAvailable: Boolean = false,
     onTabSelected: (Int) -> Unit,
     onRefresh: () -> Unit,
@@ -75,11 +77,19 @@ fun DashboardScreen(
     onScanMenuClick: () -> Unit,
     onUpdateClick: () -> Unit,
     onPickupClick: () -> Unit,
-    onDismissOverdueDialog: () -> Unit = {}
+    onDismissOverdueDialog: () -> Unit = {},
+    onSyncQueueClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val tabs = listOf("Assigned", "Completed", "Pending")
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(isActive) {
+        if (isActive) {
+            searchQuery = ""
+            focusManager.clearFocus()
+        }
+    }
     val isDarkMode = isSystemInDarkTheme()
     var assignmentSortMode by rememberSaveable { mutableStateOf(AssignmentSortMode.SCAN_ORDER) }
     var showAssignmentSortMenu by remember { mutableStateOf(false) }
@@ -206,6 +216,11 @@ fun DashboardScreen(
                         onRefresh = onRefresh,
                     )
 
+                    if (pendingSyncCount > 0) {
+                        TextButton(onClick = onSyncQueueClick, modifier = Modifier.fillMaxWidth()) {
+                            Text("$pendingSyncCount pengiriman menunggu sinkronisasi · Lihat", color = MaterialTheme.colorScheme.onPrimary)
+                        }
+                    }
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
@@ -382,7 +397,7 @@ fun DashboardScreen(
                 ) { sharedModifier ->
                     FloatingActionButton(
                         onClick = onScanMenuClick,
-                        modifier = sharedModifier.fillMaxSize().scale(fabScale),
+                        modifier = sharedModifier.fillMaxSize().graphicsLayer { scaleX = fabScale; scaleY = fabScale },
                         containerColor = scanBg,
                         contentColor = scanFg,
                         shape = RoundedCornerShape(18.dp),
@@ -1000,7 +1015,7 @@ private fun SideTonalButton(
         modifier = modifier
             .height(48.dp)
             .width(width)
-            .scale(scale),
+            .graphicsLayer { scaleX = scale; scaleY = scale },
         shape = RoundedCornerShape(16.dp),
         colors = ButtonDefaults.filledTonalButtonColors(
             containerColor = containerColor,

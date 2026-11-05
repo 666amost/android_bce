@@ -4,6 +4,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 data class ManifestPayload(
     val awbNo: String,
@@ -27,8 +28,21 @@ data class ManifestPayload(
     val biayaTransit: Int,
     val total: Int,
     val isiBarang: String,
-    val courierId: String = ""
+    val courierId: String = "",
+    val isRetry: Boolean = false,
 ) {
+    fun matchesStored(stored: JsonObject): Boolean = toJsonObject().all { (key, expected) ->
+        val actual = stored[key]?.jsonPrimitive?.contentOrNull ?: return@all false
+        val value = expected.jsonPrimitive.content
+        when (key) {
+            "metode_pembayaran" -> normalizePaymentMethod(actual) == normalizePaymentMethod(value)
+            "awb_date" -> actual.substringBefore('T') == value
+            "coli", "berat_kg", "harga_per_kg", "sub_total", "biaya_admin", "biaya_packaging", "biaya_transit", "total" ->
+                actual.toDoubleOrNull() == value.toDoubleOrNull()
+            else -> actual.trim() == value.trim()
+        }
+    }
+
     fun toJsonObject(): JsonObject = buildJsonObject {
         put("awb_no", awbNo)
         put("awb_date", awbDate)

@@ -10,11 +10,10 @@ import android.net.Uri
 import android.util.Log
 import androidx.exifinterface.media.ExifInterface
 import com.bce.courier.BuildConfig
-import com.bce.courier.data.manager.SessionManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
@@ -49,9 +48,6 @@ object SupabaseStorageService {
     ): String? {
         return withContext(Dispatchers.IO) {
             try {
-                val sessionManager = SessionManager(context)
-                val userToken = sessionManager.getAccessToken()
-
                 val compressedBytes = compressImage(context, uri, isCameraPhoto, courierName, locationText)
                 if (compressedBytes == null) {
                     Log.e(TAG, "Failed to compress image")
@@ -60,7 +56,9 @@ object SupabaseStorageService {
 
                 Log.d(TAG, "Compressed image size: ${compressedBytes.size / 1024}KB")
 
-                uploadToSupabase(compressedBytes, awbNumber, userToken)
+                uploadToSupabase(compressedBytes, awbNumber)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error uploading image", e)
                 return@withContext null
@@ -78,9 +76,6 @@ object SupabaseStorageService {
     ): String? {
         return withContext(Dispatchers.IO) {
             try {
-                val sessionManager = SessionManager(context)
-                val userToken = sessionManager.getAccessToken()
-
                 val compressedBytes = compressImageFromFile(file, isCameraPhoto, courierName, locationText)
                 if (compressedBytes == null) {
                     Log.e(TAG, "Failed to compress image from file")
@@ -89,7 +84,11 @@ object SupabaseStorageService {
 
                 Log.d(TAG, "Compressed image size: ${compressedBytes.size / 1024}KB")
 
-                uploadToSupabase(compressedBytes, awbNumber, userToken)
+                uploadToSupabase(compressedBytes, awbNumber)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error uploading image from file", e)
                 return@withContext null
@@ -100,7 +99,6 @@ object SupabaseStorageService {
     private suspend fun uploadToSupabase(
         compressedBytes: ByteArray,
         awbNumber: String,
-        userToken: String?
     ): String? {
         return withContext(Dispatchers.IO) {
             try {
@@ -108,7 +106,6 @@ object SupabaseStorageService {
                 val fileName = "$awbNumber-$timestamp.jpg"
                 val filePath = "$FOLDER_PATH/$fileName"
 
-                val client = OkHttpClient.Builder().build()
                 val uploadUrl = "${BuildConfig.SUPABASE_URL}/storage/v1/object/$BUCKET_NAME/$filePath"
 
                 val requestBody = compressedBytes.toRequestBody("image/jpeg".toMediaType())
@@ -119,26 +116,22 @@ object SupabaseStorageService {
                     .addHeader("Content-Type", "image/jpeg")
                     .addHeader("apikey", BuildConfig.SUPABASE_ANON_KEY)
 
-                if (userToken != null) {
-                    requestBuilder.addHeader("Authorization", "Bearer $userToken")
-                } else {
-                    requestBuilder.addHeader("Authorization", "Bearer ${BuildConfig.SUPABASE_ANON_KEY}")
-                }
-
                 val request = requestBuilder.build()
 
                 Log.d(TAG, "Uploading to: $uploadUrl")
-                val response = client.newCall(request).execute()
-
-                if (response.isSuccessful) {
+                NetworkModule.authenticatedClient.newCall(request).execute().use { response ->
+                  if (response.isSuccessful) {
                     val publicUrl = "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/$BUCKET_NAME/$filePath"
                     Log.d(TAG, "Image uploaded successfully: $publicUrl")
                     return@withContext publicUrl
-                } else {
+                  } else {
                     val errorBody = response.body?.string()
                     Log.e(TAG, "Upload failed: ${response.code} - $errorBody")
                     return@withContext null
+                  }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error uploading to supabase", e)
                 return@withContext null

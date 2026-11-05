@@ -70,9 +70,10 @@ interface CourierApiService {
     ): Response<List<UserData>>
 
     @POST("manifest")
+    @Headers("Prefer: return=representation")
     suspend fun insertManifest(
         @Body payload: JsonObject
-    ): Response<Unit>
+    ): Response<List<JsonObject>>
 
     @GET("customers")
     suspend fun getCustomers(
@@ -88,7 +89,7 @@ interface CourierApiService {
         @Query("awb_no") awbNoFilter: String? = null,
         @Query("or") orFilter: String? = null,
         @Query("origin_branch") originBranchFilter: String? = null,
-        @Query("order") order: String = "awb_date.desc",
+        @Query("order") order: String = "awb_date.desc,awb_no.desc",
         @Query("limit") limit: Int = 50,
         @Query("select") select: String = "*"
     ): Response<List<JsonObject>>

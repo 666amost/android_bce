@@ -38,6 +38,7 @@ fun ContinuousScannerContent(
     scannedItems: List<ScannedItem>,
     lastScanStatus: String = "none",
     isActive: Boolean = true,
+    startPreview: Boolean = true,
 ) {
     val isDarkMode = isSystemInDarkTheme()
 
@@ -74,6 +75,7 @@ fun ContinuousScannerContent(
                 ScannerView(
                     isFlashOn = isFlashOn,
                     isActive = isActive,
+                    startPreview = startPreview,
                     onBarcodeDetected = onBarcodeDetected
                 )
 

@@ -120,6 +120,10 @@ gradle.properties
 # Local source backups/archives
 *.zip
 
+# Local user-feedback recordings
+/WhatsApp Ptt*.ogg
+/pencarian.ogg
+
 # Gradle wrapper (optional - uncomment if you don't want to commit wrapper)
 # gradle/wrapper/gradle-wrapper.jar
 # gradle/wrapper/gradle-wrapper.properties

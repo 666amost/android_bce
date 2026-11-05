@@ -91,6 +91,32 @@ private data class BarcodeFeedback(
 fun ScannerView(
     isFlashOn: Boolean = false,
     isActive: Boolean = true,
+    startPreview: Boolean = true,
+    onBarcodeDetected: (String) -> Unit,
+) {
+    DeferredScannerPreview(startPreview) {
+        CameraScannerView(isFlashOn, isActive, onBarcodeDetected)
+    }
+}
+
+/** Keep a running preview through the closing animation; allocate it after entry settles. */
+@Composable
+internal fun DeferredScannerPreview(startPreview: Boolean, content: @Composable () -> Unit) {
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(startPreview) {
+        if (startPreview && !started) {
+            androidx.compose.runtime.withFrameNanos { }
+            started = true
+        }
+    }
+    Box(Modifier.fillMaxSize()) { if (started) content() }
+}
+
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
+@Composable
+private fun CameraScannerView(
+    isFlashOn: Boolean,
+    isActive: Boolean,
     onBarcodeDetected: (String) -> Unit,
 ) {
     val context = LocalContext.current

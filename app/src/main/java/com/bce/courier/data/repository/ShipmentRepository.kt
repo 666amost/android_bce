@@ -24,13 +24,7 @@ import retrofit2.Response
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.net.ConnectException
-import javax.net.ssl.SSLException
-import java.net.UnknownServiceException
 import java.io.File
-import java.io.IOException
 
 class ShipmentRepository(
     private val apiService: CourierApiService,
@@ -343,6 +337,7 @@ class ShipmentRepository(
         }
     }
 
+    /** Persist first: the courier can continue before uploads and branch sync finish. */
     suspend fun updateShipment(
         awb: String,
         status: String,
@@ -356,33 +351,35 @@ class ShipmentRepository(
         courierId: String,
         armada: String,
         platArmada: String,
-        locationAddress: String? = null
-    ): Result<DeliveryUpdateOutcome> {
-        return updateShipmentInternal(
-            awb, status, notes, pendingReasonCode, pendingReasonNote, lat, lng, photo, courierName,
-            courierId, armada, platArmada, locationAddress, saveToQueueOnError = true
-        )
-    }
-
-    suspend fun updateShipmentDirect(
-        awb: String,
-        status: String,
-        notes: String?,
-        pendingReasonCode: String?,
-        pendingReasonNote: String?,
-        lat: Double?,
-        lng: Double?,
-        photo: String?,
-        courierName: String,
-        courierId: String,
-        armada: String,
-        platArmada: String,
-        locationAddress: String? = null
-    ): Result<DeliveryUpdateOutcome> {
-        return updateShipmentInternal(
-            awb, status, notes, pendingReasonCode, pendingReasonNote, lat, lng, photo, courierName,
-            courierId, armada, platArmada, locationAddress, saveToQueueOnError = false
-        )
+        locationAddress: String? = null,
+        isCameraPhoto: Boolean = true,
+    ): Result<DeliveryUpdateOutcome> = withContext(Dispatchers.IO) {
+        try {
+            val cleanStatus = DeliveryStatus.normalized(status)
+            val validationError = validateDeliveryUpdate(cleanStatus, pendingReasonCode, pendingReasonNote)
+            require(validationError == null) { validationError.orEmpty() }
+            require(awb.isNotBlank()) { "Nomor resi wajib diisi" }
+            require(courierId.isNotBlank() && courierId != "unknown") { "Silakan masuk ulang sebelum menyimpan" }
+            require(photo != null && File(photo).isFile && File(photo).length() > 0) {
+                "Foto bukti belum tersimpan. Silakan ambil foto kembali."
+            }
+            pendingDao.enqueue(PendingUpdateEntity(
+                awb = awb.trim().uppercase(), status = cleanStatus, notes = notes,
+                pendingReasonCode = pendingReasonCode, pendingReasonNote = pendingReasonNote,
+                latitude = lat, longitude = lng, photoPath = photo,
+                courierName = courierName, courierId = courierId, armada = armada,
+                platArmada = platArmada, locationAddress = locationAddress,
+                isCameraPhoto = isCameraPhoto,
+            ))
+            // If WorkManager is temporarily unavailable, the persisted job is resumed on login.
+            runCatching { SyncWorker.enqueueSyncWork(context) }
+                .onFailure { Log.w(tag, "Upload queued; scheduling will resume on next open", it) }
+            Result.success(DeliveryUpdateOutcome.QUEUED)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     suspend fun updateShipmentDirectWithUrl(
@@ -396,8 +393,6 @@ class ShipmentRepository(
         photoUrl: String?,
         courierName: String,
         courierId: String,
-        armada: String,
-        platArmada: String,
         locationAddress: String? = null
     ): Result<Unit> {
         val cleanStatus = DeliveryStatus.normalized(status)
@@ -416,134 +411,31 @@ class ShipmentRepository(
             courierName = courierName,
             courierId = courierId,
             locationAddress = locationAddress,
-        ).onSuccess {
-            syncDeliveredToBranch(awb, cleanStatus, photoUrl, courierName, armada, platArmada)
+        )
+    }
+
+    suspend fun mergePendingUpdates(courierId: String, shipments: List<ShipmentItem>): List<ShipmentItem> {
+        val pending = pendingDao.getForCourier(courierId).associateBy { it.awb }
+        if (pending.isEmpty()) return shipments
+        val cached = getDashboardCache(courierId).shipments
+        val combined = shipments + cached.filter { it.awb in pending && shipments.none { row -> row.awb == it.awb } }
+        return combined.map { item ->
+            val update = pending[item.awb] ?: return@map item
+            item.copy(
+                current_status = update.status,
+                pending_reason_code = update.pendingReasonCode,
+                pending_reason_note = update.pendingReasonNote,
+                pending_at = if (DeliveryStatus.isPending(update.status)) java.time.Instant.ofEpochMilli(update.timestamp).toString() else null,
+                updated_at = java.time.Instant.ofEpochMilli(update.timestamp).toString(),
+            )
         }
     }
 
-    private suspend fun updateShipmentInternal(
-        awb: String,
-        status: String,
-        notes: String?,
-        pendingReasonCode: String?,
-        pendingReasonNote: String?,
-        lat: Double?,
-        lng: Double?,
-        photo: String?,
-        courierName: String,
-        courierId: String,
-        armada: String,
-        platArmada: String,
-        locationAddress: String?,
-        saveToQueueOnError: Boolean
-    ): Result<DeliveryUpdateOutcome> {
-        return try {
-            val cleanAwb = awb.trim().uppercase()
-            val cleanStatus = DeliveryStatus.normalized(status)
-            val validationError = validateDeliveryUpdate(cleanStatus, pendingReasonCode, pendingReasonNote)
-            if (validationError != null) return Result.failure(IllegalArgumentException(validationError))
+    fun observePendingUpdates() = pendingDao.observePendingUpdates()
 
-            val photoFile = photo?.let { File(it) }?.takeIf { it.exists() }
-            var photoUrl: String? = null
-
-            if (photoFile != null) {
-                photoUrl = try {
-                    com.bce.courier.data.api.SupabaseStorageService.uploadImage(
-                        context,
-                        photoFile,
-                        cleanAwb,
-                        true,
-                        courierName,
-                        lat?.let { "${it},${lng}" }
-                    )
-                } catch (_: Exception) {
-                    null
-                }
-
-                if (photoUrl == null) {
-                    if (saveToQueueOnError) {
-                        val pendingUpdate = PendingUpdateEntity(
-                            awb = cleanAwb,
-                            status = cleanStatus,
-                            notes = notes,
-                            pendingReasonCode = pendingReasonCode,
-                            pendingReasonNote = pendingReasonNote,
-                            latitude = lat,
-                            longitude = lng,
-                            photoPath = photo,
-                            courierName = courierName,
-                            courierId = courierId,
-                            armada = armada,
-                            platArmada = platArmada,
-                            locationAddress = locationAddress,
-                            priority = if (cleanStatus == DeliveryStatus.DELIVERED) 1 else 2
-                        )
-                        pendingDao.insert(pendingUpdate)
-                        SyncWorker.enqueueSyncWork(context)
-                        return Result.success(DeliveryUpdateOutcome.QUEUED)
-                    }
-                    return Result.failure(Exception("Photo upload failed"))
-                }
-            }
-
-            try {
-                commitDeliveryStatus(
-                    awb = cleanAwb,
-                    status = cleanStatus,
-                    notes = notes,
-                    pendingReasonCode = pendingReasonCode,
-                    pendingReasonNote = pendingReasonNote,
-                    lat = lat,
-                    lng = lng,
-                    photoUrl = photoUrl,
-                    courierName = courierName,
-                    courierId = courierId,
-                    locationAddress = locationAddress,
-                ).getOrThrow()
-
-                syncDeliveredToBranch(cleanAwb, cleanStatus, photoUrl, courierName, armada, platArmada)
-
-                if (photoFile != null) {
-                    runCatching { photoFile.delete() }
-                }
-                Result.success(DeliveryUpdateOutcome.UPDATED)
-            } catch (e: Exception) {
-                when {
-                    saveToQueueOnError && (
-                        e is SocketTimeoutException ||
-                            e is UnknownHostException ||
-                            e is ConnectException ||
-                            e is UnknownServiceException ||
-                            e is SSLException ||
-                            e is IOException ||
-                            (e is HttpStatusException && e.retryable)
-                        ) -> {
-                        val pendingUpdate = PendingUpdateEntity(
-                            awb = cleanAwb,
-                            status = cleanStatus,
-                            notes = notes,
-                            pendingReasonCode = pendingReasonCode,
-                            pendingReasonNote = pendingReasonNote,
-                            latitude = lat,
-                            longitude = lng,
-                            photoPath = photo,
-                            courierName = courierName,
-                            courierId = courierId,
-                            armada = armada,
-                            platArmada = platArmada,
-                            locationAddress = locationAddress,
-                            priority = if (cleanStatus == DeliveryStatus.DELIVERED) 1 else 2
-                        )
-                        pendingDao.insert(pendingUpdate)
-                        SyncWorker.enqueueSyncWork(context)
-                        Result.success(DeliveryUpdateOutcome.QUEUED)
-                    }
-                    else -> throw e
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+    suspend fun retryFailedUpdates(courierId: String) {
+        pendingDao.retryFailed(courierId)
+        SyncWorker.enqueueSyncWork(context)
     }
 
     fun observePendingCount() = pendingDao.observePendingCount()
@@ -595,46 +487,38 @@ class ShipmentRepository(
         }
     }
 
-    private suspend fun syncDeliveredToBranch(
+    suspend fun syncDeliveredToBranch(
         awb: String,
         status: String,
         photoUrl: String?,
         courierName: String,
         armada: String,
         platArmada: String,
-    ) {
+    ): Result<Unit> = runCatching {
         val cleanAwb = awb.trim().uppercase()
-        if (status != DeliveryStatus.DELIVERED || !cleanAwb.startsWith("BE")) return
+        if (status != DeliveryStatus.DELIVERED || !cleanAwb.startsWith("BE")) return@runCatching
         if (photoUrl.isNullOrBlank()) {
             Log.w(tag, "Skip branch scanttd for $cleanAwb: missing photoUrl")
-            return
+            error("Foto bukti belum berhasil diunggah")
         }
-        runCatching {
-            val branchRes = branchApiService.syncScanTtd(
-                BuildConfig.BRANCH_API_KEY,
-                BranchScanTtdRequest(
-                    no_resi = cleanAwb,
-                    nama_kurir = courierName,
-                    armada = armada,
-                    plat_armada = platArmada,
-                    gambar = photoUrl,
-                    pemindai = courierName,
-                )
-            )
-            if (!branchRes.isSuccessful) {
-                val error = runCatching { branchRes.errorBody()?.string() }.getOrNull()
-                Log.w(tag, "Branch scanttd failed for $cleanAwb: ${branchRes.code()} ${error.orEmpty()}".trim())
-            }
-        }.onFailure { error ->
-            Log.w(tag, "Branch scanttd error for $cleanAwb: ${error.message}", error)
+        val branchRes = branchApiService.syncScanTtd(
+            BuildConfig.BRANCH_API_KEY,
+            BranchScanTtdRequest(
+                no_resi = cleanAwb, nama_kurir = courierName, armada = armada,
+                plat_armada = platArmada, gambar = photoUrl, pemindai = courierName,
+            ),
+        )
+        if (!branchRes.isSuccessful) {
+            val error = runCatching { branchRes.errorBody()?.string() }.getOrNull()
+            throw HttpStatusException(branchRes.code(), error ?: "Sinkronisasi cabang belum berhasil")
         }
     }
 
-    private class HttpStatusException(
+    class HttpStatusException(
         val statusCode: Int,
         message: String,
     ) : Exception(message) {
-        val retryable: Boolean = statusCode == 408 || statusCode == 429 || statusCode >= 500
+        val retryable: Boolean = statusCode == 401 || statusCode == 408 || statusCode == 429 || statusCode >= 500
     }
 }
 

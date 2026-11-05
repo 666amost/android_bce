@@ -37,6 +37,11 @@ import androidx.core.graphics.get
 import androidx.core.graphics.set
 import com.bce.courier.R
 import com.bce.courier.data.model.ManifestItem
+import com.bce.courier.data.model.paymentMethodLabel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.Dimension
 import com.google.zxing.EncodeHintType
@@ -68,6 +73,9 @@ fun PickupDashboardScreen(
     val isDarkMode = isSystemInDarkTheme()
     val isSearchMode = remember(searchQuery) { searchQuery.trim().isNotEmpty() }
     val displayedList = if (isSearchMode) searchResults else manifestList
+    var selectedForPrint by remember { mutableStateOf<ManifestItem?>(null) }
+    var printingAwb by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     fun formatRupiah(amount: Int): String {
         return NumberFormat.getCurrencyInstance(Locale("id", "ID")).format(amount)
@@ -82,6 +90,43 @@ fun PickupDashboardScreen(
         } catch (_: Exception) {
             dateStr
         }
+    }
+
+    selectedForPrint?.let { selected ->
+        AlertDialog(
+            onDismissRequest = { selectedForPrint = null },
+            title = { Text("Cetak resi ${selected.awbNo}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Penerima: ${selected.namaPenerima}")
+                    Text("Tanggal: ${formatDate(selected.awbDate)}")
+                    Text("Pembayaran: ${paymentMethodLabel(selected.metodePembayaran)}", fontWeight = FontWeight.Bold)
+                    Text("Total: ${formatRupiah(selected.total)}")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (printingAwb == null) {
+                        // Use this immutable selection even if search results reorder meanwhile.
+                        val snapshot = selected.copy()
+                        selectedForPrint = null
+                        printingAwb = snapshot.awbNo
+                        scope.launch {
+                            try {
+                                generateAndOpenPdf(context, snapshot)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Gagal membuat PDF: ${e.message}", Toast.LENGTH_LONG).show()
+                            } finally {
+                                printingAwb = null
+                            }
+                        }
+                    }
+                }) { Text("Cetak resi ini") }
+            },
+            dismissButton = { TextButton(onClick = { selectedForPrint = null }) { Text("Kembali") } },
+        )
     }
 
     Scaffold(
@@ -177,12 +222,13 @@ fun PickupDashboardScreen(
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 80.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            items(displayedList) { item ->
+                            items(displayedList, key = { it.awbNo }) { item ->
                                 ManifestCard(
                                     item = item,
                                     formatRupiah = ::formatRupiah,
                                     formatDate = ::formatDate,
-                                    context = context
+                                    printingAwb = printingAwb,
+                                    onPrint = { selectedForPrint = it.copy() }
                                 )
                             }
                         }
@@ -232,9 +278,9 @@ private fun ManifestCard(
     item: ManifestItem,
     formatRupiah: (Int) -> String,
     formatDate: (String) -> String,
-    context: Context
+    printingAwb: String?,
+    onPrint: (ManifestItem) -> Unit,
 ) {
-    var isGeneratingPdf by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -325,96 +371,63 @@ private fun ManifestCard(
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Pembayaran: ${paymentMethodLabel(item.metodePembayaran)}", fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(12.dp))
 
             Button(
-                onClick = {
-                    isGeneratingPdf = true
-                    generateAndOpenPdf(context, item) {
-                        isGeneratingPdf = false
-                    }
-                },
+                onClick = { onPrint(item) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isGeneratingPdf,
+                enabled = printingAwb == null,
                 shape = RoundedCornerShape(8.dp)
             ) {
-                if (isGeneratingPdf) {
+                if (printingAwb == item.awbNo) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Generating...")
+                    Text("Menyiapkan PDF...")
                 } else {
                     Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Print / Download PDF")
+                    Text("Cetak / Unduh PDF")
                 }
             }
         }
     }
 }
 
-private fun generateAndOpenPdf(context: Context, item: ManifestItem, onComplete: () -> Unit) {
-    try {
-        val pdfDocument = PdfDocument()
-        val pageWidth = 283
-        val pageHeight = 283
-        val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
-        val page = pdfDocument.startPage(pageInfo)
-
-        drawWebStyleAwbLabel(
-            context = context,
-            canvas = page.canvas,
-            item = item,
-            pageWidth = pageWidth.toFloat(),
-            pageHeight = pageHeight.toFloat()
-        )
-
-        pdfDocument.finishPage(page)
-
-        val fileName = "AWB_${item.awbNo}.pdf"
+private suspend fun generateAndOpenPdf(context: Context, item: ManifestItem) {
+    val file = withContext(Dispatchers.IO) {
         val docsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-        val outDir = docsDir ?: context.filesDir
-        if (!outDir.exists()) outDir.mkdirs()
-        val file = File(outDir, fileName)
-
-        FileOutputStream(file).use { fos ->
-            pdfDocument.writeTo(fos)
-        }
-        pdfDocument.close()
-
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.provider",
-            file
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/pdf")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-
+            ?: File(context.filesDir, "awb_labels")
+        check(docsDir.isDirectory || docsDir.mkdirs()) { "Folder PDF tidak tersedia" }
+        val safeAwb = item.awbNo.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+        // A fresh URI prevents PDF viewers from reusing an older cached label.
+        val output = File(docsDir, "AWB_${safeAwb}_${UUID.randomUUID()}.pdf")
+        val document = PdfDocument()
         try {
-            context.startActivity(
-                Intent.createChooser(intent, "Open with")
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(
-                context.applicationContext,
-                "PDF tersimpan: $fileName",
-                Toast.LENGTH_LONG
-            ).show()
+            val pageInfo = PdfDocument.PageInfo.Builder(283, 283, 1).create()
+            val page = document.startPage(pageInfo)
+            drawWebStyleAwbLabel(context, page.canvas, item, 283f, 283f)
+            document.finishPage(page)
+            FileOutputStream(output).use { document.writeTo(it) }
+        } finally {
+            document.close()
         }
-        onComplete()
-    } catch (e: Exception) {
-        Toast.makeText(
-            context.applicationContext,
-            "Error generate PDF: ${e.message}",
-            Toast.LENGTH_LONG
-        ).show()
-        onComplete()
+        output
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/pdf")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(Intent.createChooser(intent, "Cetak resi ${item.awbNo}"))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "PDF tersimpan: ${file.name}", Toast.LENGTH_LONG).show()
     }
 }
 

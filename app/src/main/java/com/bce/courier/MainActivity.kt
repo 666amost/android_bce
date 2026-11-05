@@ -53,6 +53,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.bce.courier.data.api.NetworkModule
 import com.bce.courier.data.manager.SessionManager
+import com.bce.courier.data.local.PickupDraftStore
+import com.bce.courier.data.repository.PickupManifestRepository
+import com.bce.courier.data.sync.SyncWorker
+import com.bce.courier.ui.component.SyncQueueDialog
+import com.bce.courier.ui.component.DeliveryCompletion
+import kotlinx.coroutines.CancellationException
 import com.bce.courier.data.model.*
 import com.bce.courier.tracking.CourierTrackingService
 import com.bce.courier.tracking.CourierTrackingStatus
@@ -503,8 +509,12 @@ class MainActivity : ComponentActivity() {
                 var showOverdueDialog by remember { mutableStateOf(false) }
 
                 // Sync Count
-                val pendingSyncCount by NetworkModule.shipmentRepository.observePendingCount()
-                    .collectAsState(initial = 0)
+                val allQueuedUpdates by NetworkModule.shipmentRepository.observePendingUpdates()
+                    .collectAsState(initial = emptyList())
+                val myQueuedUpdates = allQueuedUpdates.filter { it.courierId == sessionManager.getUserId() }
+                val pendingSyncCount = myQueuedUpdates.size
+                var showSyncQueue by remember { mutableStateOf(false) }
+
 
                 // New Features State
                 var showBulkDialog by remember { mutableStateOf(false) }
@@ -538,6 +548,7 @@ class MainActivity : ComponentActivity() {
                         showVersionDialog = false
                         showSupportDialog = false
                         showNearbyCouriers = false
+                        showSyncQueue = false
                         showProfilePanel = false
                         showScanModePicker = false
                         showBulkDialog = false
@@ -770,7 +781,7 @@ class MainActivity : ComponentActivity() {
                                 val cached = NetworkModule.shipmentRepository.getDashboardCache(userId)
                                 if (cached.shipments.isNotEmpty()) {
                                     applyDashboardShipments(
-                                        body = cached.shipments,
+                                        body = NetworkModule.shipmentRepository.mergePendingUpdates(userId, cached.shipments),
                                         fromCache = true,
                                         cacheUpdatedAt = cached.updatedAt,
                                     )
@@ -783,7 +794,7 @@ class MainActivity : ComponentActivity() {
                         try {
                             val response = NetworkModule.apiService.getShipments(buildShipmentFilters(userId))
                             if (response.isSuccessful) {
-                                val body = response.body() ?: emptyList()
+                                val body = NetworkModule.shipmentRepository.mergePendingUpdates(userId, response.body() ?: emptyList())
                                 val cachedAt = System.currentTimeMillis()
                                 applyDashboardShipments(body, fromCache = false, cacheUpdatedAt = cachedAt)
                                 try {
@@ -802,7 +813,7 @@ class MainActivity : ComponentActivity() {
                                 val email = sessionManager.getRememberedEmail()
                                 val password = sessionManager.getRememberedPassword()
                                 var recovered = false
-                                if (!email.isNullOrBlank() && !password.isNullOrBlank()) {
+                                if (sessionManager.needsReauthentication() && !email.isNullOrBlank() && !password.isNullOrBlank()) {
                                     try {
                                         val resp = NetworkModule.authApiService.login(
                                             request = LoginRequest(email, password)
@@ -825,7 +836,7 @@ class MainActivity : ComponentActivity() {
                                             recovered = true
                                             val retryResponse = NetworkModule.apiService.getShipments(buildShipmentFilters(body.user.id))
                                             if (retryResponse.isSuccessful) {
-                                                val retryBody = retryResponse.body() ?: emptyList()
+                                                val retryBody = NetworkModule.shipmentRepository.mergePendingUpdates(body.user.id, retryResponse.body() ?: emptyList())
                                                 val cachedAt = System.currentTimeMillis()
                                                 applyDashboardShipments(
                                                     retryBody,
@@ -850,10 +861,13 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                                 if (!recovered) {
-                                    sessionManager.clearSession()
-                                    isLoggedIn = false
-                                    navController.navigate("login") {
-                                        popUpTo("dashboard") { inclusive = true }
+                                    markDashboardDataStale()
+                                    // Offline/timeout failures retain the session and local work.
+                                    if (sessionManager.needsReauthentication()) {
+                                        isLoggedIn = false
+                                        navController.navigate("login") {
+                                            popUpTo("dashboard") { inclusive = true }
+                                        }
                                     }
                                 }
                             } else {
@@ -892,7 +906,8 @@ class MainActivity : ComponentActivity() {
                         table = "shipments",
                         filter = null,
                         events = listOf("UPDATE"),
-                        accessToken = token
+                        accessToken = token,
+                        accessTokenProvider = { sessionManager.getAccessToken() },
                     ) { change ->
                         val awb = change.awbNumber
                         val wasInList = awb != null && allShipments.any { it.awb == awb }
@@ -983,12 +998,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                LaunchedEffect(isLoggedIn) {
+                    if (isLoggedIn) SyncWorker.enqueueSyncWork(appContext)
+                }
+
                 // Silent background refresh for ASSIGNED tab (tab 0) every 60 seconds (fallback)
-                LaunchedEffect(selectedTab, isLoggedIn, showBulkDialog, scanMode) {
-                    if (isLoggedIn && selectedTab == 0 && !showBulkDialog && scanMode == ScanMode.NONE) {
-                        while (selectedTab == 0 && isLoggedIn && !showBulkDialog && scanMode == ScanMode.NONE) {
+                LaunchedEffect(selectedTab, isLoggedIn, showBulkDialog, scanMode, showProfilePanel, showScanModePicker) {
+                    if (isLoggedIn && selectedTab == 0 && !showBulkDialog && !showProfilePanel && !showScanModePicker && scanMode == ScanMode.NONE) {
+                        while (selectedTab == 0 && isLoggedIn && !showBulkDialog && !showProfilePanel && !showScanModePicker && scanMode == ScanMode.NONE) {
                             delay(60000)
-                            if (selectedTab == 0 && isLoggedIn && !showBulkDialog && scanMode == ScanMode.NONE && !isDashboardLoading) {
+                            if (selectedTab == 0 && isLoggedIn && !showBulkDialog && !showProfilePanel && !showScanModePicker && scanMode == ScanMode.NONE && !isDashboardLoading) {
                                 loadShipments(false)
                             }
                         }
@@ -1105,9 +1124,15 @@ class MainActivity : ComponentActivity() {
                                 isShowingCachedData = isShowingDashboardCache,
                                 cachedDataUpdatedAt = dashboardCacheUpdatedAt,
                                 selectedTab = selectedTab,
+                                isActive = currentRoute == "dashboard" && !showProfilePanel && !showBulkDialog &&
+                                    !showScanModePicker && scanMode == ScanMode.NONE,
                                 updateAvailable = updateAvailable,
                                 onTabSelected = { selectedTab = it },
-                                onRefresh = { fetchShipments() },
+                                onRefresh = {
+                                    SyncWorker.enqueueSyncWork(appContext)
+                                    fetchShipments()
+                                },
+                                onSyncQueueClick = { showSyncQueue = true },
                                 onProfileClick = { courierMotion.open(CourierMotionOrigin.Profile); showProfilePanel = true },
                                 onShipmentClick = { shipmentItem ->
                                     val normalized = normalizeAwb(shipmentItem.awb) ?: shipmentItem.awb
@@ -1198,7 +1223,14 @@ class MainActivity : ComponentActivity() {
                             var retryCount by remember(awb) { mutableIntStateOf(0) }
                             var showReportDialog by remember(awb) { mutableStateOf(false) }
                             var lastResolveDebug by remember(awb) { mutableStateOf<String?>(null) }
-                            var isUpdatingStatus by remember { mutableStateOf(false) }
+                            var isUpdatingStatus by remember(awb) { mutableStateOf(false) }
+                            var completedStatus by rememberSaveable(awb) { mutableStateOf<String?>(null) }
+                            var completedOutcome by rememberSaveable(awb) { mutableStateOf<String?>(null) }
+                            val deliveryCompletion = completedStatus?.let { status ->
+                                completedOutcome?.let { outcome ->
+                                    DeliveryCompletion(status, DeliveryUpdateOutcome.valueOf(outcome))
+                                }
+                            }
 
                             LaunchedEffect(awb, allShipments, resolveAttempted) {
                                 if (awb.isNullOrBlank()) return@LaunchedEffect
@@ -1232,15 +1264,14 @@ class MainActivity : ComponentActivity() {
                             if (resolvedShipment != null) {
                                 UpdateShipmentScreen(
                                     shipment = resolvedShipment,
-                                    onBack = { navController.popBackStack() },
-                                    onUpdate = { status, notes, pendingReasonCode, pendingReasonNote, location, photo, isCameraPhoto ->
+                                    onBack = {
+                                        if (!isUpdatingStatus && deliveryCompletion == null) navController.popBackStack()
+                                    },
+                                    onUpdate = update@{ status, notes, pendingReasonCode, pendingReasonNote, location, photo, isCameraPhoto ->
+                                        if (isUpdatingStatus || deliveryCompletion != null) return@update
+                                        isUpdatingStatus = true
                                         lifecycleScope.launch {
-                                            isUpdatingStatus = true
                                             try {
-                                                if (!locationHelper.isLocationEnabled()) {
-                                                    locationHelper.requestEnableLocation(this@MainActivity) { }
-                                                }
-
                                                 var photoPath: String? = null
                                                 if (photo != null) {
                                                     val pendingUploadDir = File(filesDir, "pending_uploads").apply { mkdirs() }
@@ -1250,18 +1281,18 @@ class MainActivity : ComponentActivity() {
                                                     )
                                                     photoPath = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                                         try {
-                                                            contentResolver.openInputStream(photo)?.use { input ->
+                                                            val stream = contentResolver.openInputStream(photo)
+                                                                ?: error("Foto tidak dapat dibaca. Silakan ambil foto kembali.")
+                                                            stream.use { input ->
                                                                 photoFile.outputStream().use { output ->
                                                                     input.copyTo(output)
                                                                 }
                                                             }
-                                                            if (isCameraPhoto) {
-                                                                runCatching { contentResolver.delete(photo, null, null) }
-                                                            }
+                                                            check(photoFile.length() > 0) { "Foto bukti kosong. Silakan ambil foto kembali." }
                                                             photoFile.absolutePath
                                                         } catch (e: Exception) {
                                                             Log.e("MainActivity", "Failed to save photo locally", e)
-                                                            null
+                                                            throw e
                                                         }
                                                     }
                                                 }
@@ -1269,18 +1300,8 @@ class MainActivity : ComponentActivity() {
                                                 val courierId = sessionManager.getUserId() ?: "unknown"
                                                 val courierName = sessionManager.getBestCourierName()
 
-                                                val isOnline = NetworkUtils.isOnline(this@MainActivity)
-
-                                                val locationAddress: String? = if (isOnline && location?.latitude != null) {
-                                                    withTimeoutOrNull(2000L) {
-                                                        locationHelper.getAddressFromLocationSuspend(
-                                                            location.latitude,
-                                                            location.longitude
-                                                        )
-                                                    }
-                                                } else {
-                                                    null
-                                                }
+                                                // Address lookup and network work run in the persistent worker.
+                                                val locationAddress: String? = null
 
                                                  val result = NetworkModule.shipmentRepository.updateShipment(
                                                      awb = resolvedShipment.awb,
@@ -1295,11 +1316,13 @@ class MainActivity : ComponentActivity() {
                                                      courierId = courierId,
                                                      armada = "motor",
                                                      platArmada = "BCEJKT",
-                                                     locationAddress = locationAddress
+                                                     locationAddress = locationAddress,
+                                                     isCameraPhoto = isCameraPhoto,
                                                  )
 
                                                  if (result.isSuccess) {
                                                      val outcome = result.getOrThrow()
+                                                     if (isCameraPhoto && photo != null) runCatching { contentResolver.delete(photo, null, null) }
                                                      val normalizedStatus = DeliveryStatus.normalized(status)
                                                      val nowIso = SimpleDateFormat(
                                                          "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
@@ -1320,38 +1343,39 @@ class MainActivity : ComponentActivity() {
                                                          fromCache = outcome == DeliveryUpdateOutcome.QUEUED,
                                                          cacheUpdatedAt = updatedAt,
                                                      )
-                                                     NetworkModule.shipmentRepository.replaceDashboardCache(
-                                                         courierId = courierId,
-                                                         shipments = optimisticShipments,
-                                                         cachedAt = updatedAt,
-                                                     )
+                                                     runCatching {
+                                                         NetworkModule.shipmentRepository.replaceDashboardCache(
+                                                             courierId = courierId,
+                                                             shipments = optimisticShipments,
+                                                             cachedAt = updatedAt,
+                                                         )
+                                                     }.onFailure { Log.w("MainActivity", "Delivery saved; dashboard cache update failed", it) }
 
                                                      if (normalizedStatus == DeliveryStatus.DELIVERED) {
                                                          playSound(R.raw.scan_delivered)
                                                      }
-                                                     val message = if (outcome == DeliveryUpdateOutcome.QUEUED) {
-                                                         "Disimpan offline, akan disinkronkan"
-                                                     } else {
-                                                         "Berhasil update status"
-                                                     }
-                                                     Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+                                                     completedStatus = normalizedStatus
+                                                     completedOutcome = outcome.name
                                                      Log.d("MainActivity", "Successfully updated shipment $awb to status $status")
                                                      if (outcome == DeliveryUpdateOutcome.UPDATED) loadShipments(false)
-                                                     navController.popBackStack()
                                                 } else {
                                                     val errorMessage = result.exceptionOrNull()?.message ?: "Unknown error"
                                                     Log.e("MainActivity", "Failed to update shipment $awb: $errorMessage")
                                                     Toast.makeText(appContext, "Gagal update: $errorMessage", Toast.LENGTH_LONG).show()
                                                 }
+                                            } catch (e: CancellationException) {
+                                                throw e
                                             } catch (e: Exception) {
                                                 Log.e("MainActivity", "Update shipment error", e)
-                                                Toast.makeText(appContext, "Error: ${'$'}{e.message}", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(appContext, "Gagal menyimpan: ${e.message}", Toast.LENGTH_SHORT).show()
                                             } finally {
                                                 isUpdatingStatus = false
                                             }
                                         }
                                     },
                                     isUpdating = isUpdatingStatus,
+                                    completion = deliveryCompletion,
+                                    onCompletionFinished = { navController.popBackStack() },
                                 )
                             } else {
                                 Box(
@@ -1535,11 +1559,15 @@ class MainActivity : ComponentActivity() {
                                         limit = 50
                                     )
                                     if (response.isSuccessful && response.body() != null) {
-                                        searchResults = response.body()!!.map { ManifestItem.fromJsonObject(it) }
+                                        if (normalizeManifestSearchQuery(searchQuery) == normalized) {
+                                            searchResults = response.body()!!.map { ManifestItem.fromJsonObject(it) }
+                                        }
                                     } else {
                                         searchResults = emptyList()
                                         searchErrorMessage = "Gagal memuat hasil (${response.code()})"
                                     }
+                                } catch (e: CancellationException) {
+                                    throw e
                                 } catch (e: Exception) {
                                     Log.e("MainActivity", "Failed to search manifest", e)
                                     searchResults = emptyList()
@@ -1595,6 +1623,13 @@ class MainActivity : ComponentActivity() {
 
                         composable("pickup_form") {
                             var isSubmitting by remember { mutableStateOf(false) }
+                            var submittedAwb by remember { mutableStateOf<String?>(null) }
+                            val manifestRepository = remember {
+                                PickupManifestRepository(
+                                    insert = { NetworkModule.apiService.insertManifest(it) },
+                                    findByAwb = { NetworkModule.apiService.getManifest("eq.$it") },
+                                )
+                            }
                             var customers by remember { mutableStateOf<List<CustomerData>>(emptyList()) }
                             var isLoadingCustomers by remember { mutableStateOf(false) }
                             var showCustomerSelector by remember { mutableStateOf(false) }
@@ -1619,32 +1654,32 @@ class MainActivity : ComponentActivity() {
 
                             PickupScreen(
                                 onBack = { navController.popBackStack() },
-                                onSubmit = { payload ->
+                                onSubmit = submit@{ payload ->
+                                    if (isSubmitting) return@submit
+                                    isSubmitting = true
                                     lifecycleScope.launch {
-                                        isSubmitting = true
                                         try {
-                                            val response = NetworkModule.apiService.insertManifest(payload.toJsonObject())
-                                            if (response.isSuccessful) {
-                                                playSound(R.raw.scan_success)
-                                                Toast.makeText(
-                                                    appContext,
-                                                    "AWB ${payload.awbNo} berhasil disimpan!",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                                navController.popBackStack()
-                                            } else {
-                                                playSound(R.raw.scan_error)
-                                                Toast.makeText(
-                                                    appContext,
-                                                    "Gagal menyimpan: ${response.code()}",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
+                                            val saved = manifestRepository.save(payload) { candidate ->
+                                                submittedAwb = candidate.awbNo
+                                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                    PickupDraftStore(appContext, courierId).markSubmission(candidate)
+                                                }
                                             }
+                                            PickupDraftStore(appContext, courierId).clear()
+                                            playSound(R.raw.scan_success)
+                                            Toast.makeText(
+                                                appContext,
+                                                "AWB ${saved.awbNo} berhasil disimpan!",
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                            navController.popBackStack()
+                                        } catch (e: CancellationException) {
+                                            throw e
                                         } catch (e: Exception) {
                                             playSound(R.raw.scan_error)
                                             Toast.makeText(
                                                 appContext,
-                                                "Error: ${e.message}",
+                                                "Draf tetap tersimpan. ${e.message}",
                                                 Toast.LENGTH_LONG
                                             ).show()
                                             Log.e("MainActivity", "Pickup submit error", e)
@@ -1654,6 +1689,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 isSubmitting = isSubmitting,
+                                submittedAwb = submittedAwb,
                                 customers = customers,
                                 isLoadingCustomers = isLoadingCustomers,
                                 onLoadCustomers = loadCustomers,
@@ -1788,6 +1824,7 @@ class MainActivity : ComponentActivity() {
                                     isDownloadingUpdate = isDownloadingUpdate,
                                     onBack = { closePanel {} },
                                     onNearbyCouriersClick = { showNearbyCouriers = true },
+                                    onSyncQueueClick = { showSyncQueue = true },
                                     onAppSettingsClick = {
                                         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
                                     },
@@ -1832,6 +1869,7 @@ class MainActivity : ComponentActivity() {
                                             ScannerView(
                                                 isFlashOn = isFlashOn,
                                                 isActive = scanReady && !isSearchScanProcessing,
+                                                startPreview = scanReady,
                                                 onBarcodeDetected = { rawAwb ->
                                                     if (isSearchScanProcessing) return@ScannerView
 
@@ -1929,6 +1967,7 @@ class MainActivity : ComponentActivity() {
                                             ScannerView(
                                                 isFlashOn = isFlashOn,
                                                 isActive = scanReady,
+                                                startPreview = scanReady,
                                                 onBarcodeDetected = { rawAwb ->
                                                     val awb = normalizeAwb(rawAwb)
                                                     if (awb == null) {
@@ -1975,6 +2014,7 @@ class MainActivity : ComponentActivity() {
                                     ContinuousScannerContent(
                                         onDismiss = { closePanel {} },
                                         isActive = scanReady,
+                                        startPreview = scanReady,
                                         onBarcodeDetected = { rawAwb ->
                                             val awb = normalizeAwb(rawAwb)
                                             if (awb == null) {
@@ -2121,6 +2161,17 @@ class MainActivity : ComponentActivity() {
                     }
                     if (isLoggedIn && !forceUpdateRequired && showSupportDialog) {
                         CourierSupportDialog(onDismiss = { showSupportDialog = false })
+                    }
+                    if (isLoggedIn && !forceUpdateRequired && showSyncQueue) {
+                        SyncQueueDialog(
+                            updates = myQueuedUpdates,
+                            onDismiss = { showSyncQueue = false },
+                            onRetry = {
+                                lifecycleScope.launch {
+                                    NetworkModule.shipmentRepository.retryFailedUpdates(sessionManager.getUserId().orEmpty())
+                                }
+                            },
+                        )
                     }
 
                     if (forceUpdateRequired) {

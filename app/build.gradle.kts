@@ -13,8 +13,8 @@ android {
         applicationId = "com.bce.courier"
         minSdk = 29
         targetSdk = 34
-        versionCode = 19
-        versionName = "v1.0.19"
+        versionCode = 20
+        versionName = "v1.0.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -78,6 +78,10 @@ android {
         }
         debug {
             isDebuggable = true
+            if (providers.gradleProperty("deliveryPreview").orNull.toBoolean()) {
+                applicationIdSuffix = ".preview"
+                versionNameSuffix = "-preview"
+            }
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -110,12 +114,15 @@ android {
         }
     }
 
-    // ABI splits: tetap gunakan universal APK hanya ARM agar ukuran moderat
+    // Add an x86_64 split with -PincludeEmulatorAbi=true for local emulator testing.
     splits {
         abi {
             isEnable = true
             reset()
             include("armeabi-v7a", "arm64-v8a")
+            if (providers.gradleProperty("includeEmulatorAbi").orNull.toBoolean()) {
+                include("x86_64")
+            }
             isUniversalApk = true
         }
     }
